@@ -237,6 +237,18 @@ function registerTool(name, descriptor, handler) {
 
 // Pre-flight token health check — runs before the fetch so problems are
 // surfaced in the Tool Console with a clear explanation, not a raw 401.
+//
+// What the BROWSER can check:
+//   exp       — timestamp is in the payload; no key needed
+//
+// What only the RESOURCE SERVER can check:
+//   aud       — RS verifies its own identifier is in the audience list
+//   client_id — RS confirms the requesting app is a known/allowed client
+//   scope     — RS confirms the required permission is present
+//   signature — RS validates against the JWKS; browser has no key
+//
+// We log aud / client_id / scope for visibility, but do NOT fail on them —
+// the RS is the authority on those claims, not the browser.
 function checkTokenHealth(token) {
   const claims = parseJwt(token);
   if (!claims) {
@@ -250,26 +262,27 @@ function checkTokenHealth(token) {
     return {
       ok: false,
       reason: `Token expired at ${expired}. ` +
-              `The browser cannot validate the signature, but it CAN read 'exp'. ` +
-              `A real backend would also reject this with 401.`,
+              `The browser can read 'exp' without a key. ` +
+              `The RS would also reject this with 401.`,
       claims,
     };
   }
 
-  if (claims.aud) {
-    const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
-    if (!aud.includes(CONFIG.PINGONE_CLIENT_ID)) {
-      return {
-        ok: false,
-        reason: `Token 'aud' (${aud.join(", ")}) does not match PINGONE_CLIENT_ID ` +
-                `(${CONFIG.PINGONE_CLIENT_ID}). ` +
-                `The backend would reject this with 401.`,
-        claims,
-      };
-    }
-  }
+  // Informational only — log what the RS *will* validate, but don't block here.
+  const aud       = claims.aud ? [].concat(claims.aud).join(", ") : "(not present)";
+  const clientId  = claims.client_id || claims.azp || "(not present)";
+  const scope     = claims.scope || "(not present)";
 
-  return { ok: true, claims };
+  return {
+    ok: true,
+    claims,
+    rsChecks: {
+      note: "RS validates these; browser logs them for transparency only.",
+      aud,
+      client_id: clientId,
+      scope,
+    },
+  };
 }
 
 async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
@@ -293,13 +306,14 @@ async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
 
     // 2. Pre-flight health check (browser can decode but NOT verify the signature)
     const health = checkTokenHealth(token);
-    logToolEvent(
-      `[Token pre-flight] ${health.ok ? "✓ pass" : "✗ fail — " + health.reason}`,
-      health.ok ? "info" : "error"
-    );
     if (!health.ok) {
+      logToolEvent(`[Token pre-flight] ✗ fail — ${health.reason}`, "error");
       throw new Error(`Token pre-flight failed: ${health.reason}`);
     }
+    logToolEvent(
+      `[Token pre-flight] ✓ exp OK — RS will also validate: ${JSON.stringify(health.rsChecks)}`,
+      "info"
+    );
 
     headers["Authorization"] = `Bearer ${token}`;
   }
