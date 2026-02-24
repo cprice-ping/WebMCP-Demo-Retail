@@ -223,22 +223,69 @@ function registerTool(name, descriptor, handler) {
   registerToolsWithNativeModelContext();
 }
 
+// ============================================================
+// API client
+// Wraps fetch() and logs the full outbound request to the
+// Tool Console so the invocation contract is always visible.
+// ============================================================
+
+async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
+  const url = CONFIG.SHOP_API_BASE + path;
+  const headers = { "Content-Type": "application/json" };
+
+  if (requiresAuth) {
+    const token = sessionStorage.getItem("access_token") ||
+                  sessionStorage.getItem("id_token");
+    if (!token) throw new Error("No active session — user must be signed in");
+    headers["Authorization"] = `Bearer ${token}`;
+  }
+
+  // Log the full outbound request before it goes out
+  const requestMeta = { method, url, headers: { ...headers }, body: body ?? undefined };
+  if (requiresAuth) {
+    // Show where the Bearer came from so the flow is clear
+    requestMeta["__note"] =
+      "Bearer is the OIDC access_token from the PingOne session — " +
+      "the agent forwards the user's credential; no separate agent OAuth required.";
+  }
+  logToolEvent(`[API] ${method} ${url}\n${JSON.stringify(requestMeta, null, 2)}`, "call");
+
+  const resp = await fetch(url, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+
+  if (!resp.ok) {
+    // For the demo checkout POST there is no real server — simulate a 200
+    if (method === "POST") {
+      logToolEvent(`[API] No backend at ${url} — returning simulated 200 (demo mode)`, "warn");
+      return null; // caller will synthesise the response
+    }
+    throw new Error(`API ${method} ${url} → ${resp.status} ${resp.statusText}`);
+  }
+
+  return resp.json();
+}
+
 // Tool: view_products
 registerTool(
   "view_products",
   {
-    description: "Returns the full product catalog with IDs, names, prices, and descriptions.",
+    description: "Fetches the product catalog from the backend API (no auth required).",
     parameters: {},
   },
   async () => {
-    return {
-      products: PRODUCTS.map(p => ({
-        id: p.id,
-        name: p.name,
-        price: p.price,
-        description: p.description,
-      })),
-    };
+    const data = await apiRequest("GET", "/products.json");
+    // Keep in-memory PRODUCTS in sync so the UI always works
+    if (data?.products) {
+      PRODUCTS.length = 0;
+      data.products.forEach(p => {
+        PRODUCTS.push({ ...p, emoji: ["🎧","⌨️","🔌","📷","💡","💻"][PRODUCTS.length] || "📦" });
+      });
+      renderProducts();
+    }
+    return data;
   }
 );
 
@@ -291,17 +338,39 @@ registerTool(
 registerTool(
   "checkout",
   {
-    description: "Initiates checkout for the current cart. Requires user confirmation via elicitation before the purchase is completed.",
+    description: "POSTs the cart to the checkout API using the user's Bearer token. Requires user confirmation via elicitation before the request is sent.",
     parameters: {},
   },
   async () => {
     if (Object.keys(cart).length === 0) {
       return { error: "Cart is empty. Add items before checkout." };
     }
-    // Elicitation: surface confirmation modal, wait for user
-    return new Promise((resolve) => {
-      showCheckoutModal(resolve);
+
+    // Elicitation: surface confirmation modal, wait for user decision
+    const userDecision = await new Promise((resolve) => showCheckoutModal(resolve));
+
+    if (userDecision.cancelled) return userDecision;
+
+    // User confirmed — now POST to the protected API with the Bearer token
+    const requestBody = {
+      order_id: userDecision.order.order_id,
+      items: userDecision.order.items,
+      total: userDecision.order.total,
+    };
+
+    const apiResponse = await apiRequest("POST", "/checkout", {
+      body: requestBody,
+      requiresAuth: true,
     });
+
+    // apiResponse is null when no real backend is present (demo mode)
+    const finalResult = apiResponse ?? {
+      success: true,
+      source: "demo-simulated",
+      order: userDecision.order,
+    };
+
+    return finalResult;
   }
 );
 

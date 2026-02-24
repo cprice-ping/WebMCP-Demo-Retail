@@ -19,6 +19,13 @@ const CONFIG = {
 
   // OIDC scopes to request
   PINGONE_SCOPES: "openid profile email",
+
+  // Backend API base URL.
+  // For this demo: serves static JSON from the same GitHub Pages origin.
+  // For a real deployment: point this at your API (e.g. https://api.example.com/shop).
+  // view_products → GET  {SHOP_API_BASE}/products.json   (no auth required)
+  // checkout      → POST {SHOP_API_BASE}/checkout        (Authorization: Bearer <access_token>)
+  SHOP_API_BASE: window.location.origin + window.location.pathname.replace(/\/$/, "") + "/api",
 };
 
 // Derived: PingOne authorization server base URL

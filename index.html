@@ -147,8 +147,9 @@
               <div class="tool-header">
                 <code class="tool-name">view_products</code>
                 <span class="tool-label">GET</span>
+                <span class="tool-label tool-label-api">API</span>
               </div>
-              <p class="tool-desc">Returns the full product catalog as JSON.</p>
+              <p class="tool-desc">GET <code>/api/products.json</code> — fetches catalog from the backend. No auth required.</p>
               <button class="btn-tool" data-tool="view_products">
                 Call tool
               </button>
@@ -195,8 +196,10 @@
               <div class="tool-header">
                 <code class="tool-name">checkout</code>
                 <span class="tool-label tool-label-confirm">ELICIT</span>
+                <span class="tool-label tool-label-api">API</span>
+                <span class="tool-label tool-label-auth">BEARER</span>
               </div>
-              <p class="tool-desc">Completes purchase. Requires user confirmation (elicitation).</p>
+              <p class="tool-desc">POST <code>/api/checkout</code> — elicits user confirmation, then calls the API with <code>Authorization: Bearer &lt;access_token&gt;</code>.</p>
               <button class="btn-tool" data-tool="checkout">
                 Call tool
               </button>
