@@ -113,6 +113,7 @@ async function exchangeCode(code) {
 
 const toolRegistry = {};
 const nativeRegisteredTools = new Set();
+const nativeRegistrationFailures = new Map();
 
 function ensureModelContextShim() {
   if (typeof navigator === "undefined") return null;
@@ -149,12 +150,63 @@ function registerToolsWithNativeModelContext() {
 
   Object.entries(toolRegistry).forEach(([name, value]) => {
     if (nativeRegisteredTools.has(name)) return;
+
+    const inputSchema = value.descriptor?.parameters || { type: "object", properties: {} };
+    const candidates = [
+      () => navigator.modelContext.registerTool({
+        name,
+        description: value.descriptor?.description || "",
+        inputSchema,
+        handler: value.handler,
+      }),
+      () => navigator.modelContext.registerTool({
+        name,
+        description: value.descriptor?.description || "",
+        parameters: inputSchema,
+        handler: value.handler,
+      }),
+      () => navigator.modelContext.registerTool({
+        name,
+        description: value.descriptor?.description || "",
+        schema: inputSchema,
+        execute: value.handler,
+      }),
+      () => navigator.modelContext.registerTool(name, value.descriptor, value.handler),
+    ];
+
+    let registered = false;
+    let lastErrorMessage = "Unknown registerTool error";
+
     try {
-      navigator.modelContext.registerTool(name, value.descriptor, value.handler);
-      nativeRegisteredTools.add(name);
-      logToolEvent(`Registered tool "${name}" via navigator.modelContext`);
+      for (const attempt of candidates) {
+        try {
+          attempt();
+          registered = true;
+          break;
+        } catch (e) {
+          lastErrorMessage = e?.message || String(e);
+        }
+      }
+
+      if (registered) {
+        nativeRegisteredTools.add(name);
+        nativeRegistrationFailures.delete(name);
+        logToolEvent(`Registered tool "${name}" via navigator.modelContext`);
+        return;
+      }
+
+      const prev = nativeRegistrationFailures.get(name);
+      if (prev !== lastErrorMessage) {
+        nativeRegistrationFailures.set(name, lastErrorMessage);
+        logToolEvent(`navigator.modelContext.registerTool unavailable: ${lastErrorMessage}`, "warn");
+      }
     } catch (e) {
-      logToolEvent(`navigator.modelContext.registerTool unavailable: ${e.message}`, "warn");
+      const msg = e?.message || String(e);
+      const prev = nativeRegistrationFailures.get(name);
+      if (prev !== msg) {
+        nativeRegistrationFailures.set(name, msg);
+        logToolEvent(`navigator.modelContext.registerTool unavailable: ${msg}`, "warn");
+      }
     }
   });
 }
