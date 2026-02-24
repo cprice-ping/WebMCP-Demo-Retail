@@ -229,6 +229,43 @@ function registerTool(name, descriptor, handler) {
 // Tool Console so the invocation contract is always visible.
 // ============================================================
 
+// Pre-flight token health check — runs before the fetch so problems are
+// surfaced in the Tool Console with a clear explanation, not a raw 401.
+function checkTokenHealth(token) {
+  const claims = parseJwt(token);
+  if (!claims) {
+    return { ok: false, reason: "Token is malformed — cannot decode JWT payload." };
+  }
+
+  const nowSec = Math.floor(Date.now() / 1000);
+
+  if (claims.exp && claims.exp < nowSec) {
+    const expired = new Date(claims.exp * 1000).toLocaleTimeString();
+    return {
+      ok: false,
+      reason: `Token expired at ${expired}. ` +
+              `The browser cannot validate the signature, but it CAN read 'exp'. ` +
+              `A real backend would also reject this with 401.`,
+      claims,
+    };
+  }
+
+  if (claims.aud) {
+    const aud = Array.isArray(claims.aud) ? claims.aud : [claims.aud];
+    if (!aud.includes(CONFIG.PINGONE_CLIENT_ID)) {
+      return {
+        ok: false,
+        reason: `Token 'aud' (${aud.join(", ")}) does not match PINGONE_CLIENT_ID ` +
+                `(${CONFIG.PINGONE_CLIENT_ID}). ` +
+                `The backend would reject this with 401.`,
+        claims,
+      };
+    }
+  }
+
+  return { ok: true, claims };
+}
+
 async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
   const url = CONFIG.SHOP_API_BASE + path;
   const headers = { "Content-Type": "application/json" };
@@ -236,17 +273,36 @@ async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
   if (requiresAuth) {
     const token = sessionStorage.getItem("access_token") ||
                   sessionStorage.getItem("id_token");
-    if (!token) throw new Error("No active session — user must be signed in");
+
+    // 1. Existence check (browser can do this)
+    if (!token) {
+      throw new Error(
+        "No token in sessionStorage — user must sign in before calling a protected tool. " +
+        "(Contrast with MCP Server: the server would return 401 on the transport; " +
+        "here the tool detects the gap before the fetch even leaves the browser.)"
+      );
+    }
+
+    // 2. Pre-flight health check (browser can decode but NOT verify the signature)
+    const health = checkTokenHealth(token);
+    logToolEvent(
+      `[Token pre-flight] ${health.ok ? "✓ pass" : "✗ fail — " + health.reason}`,
+      health.ok ? "info" : "error"
+    );
+    if (!health.ok) {
+      throw new Error(`Token pre-flight failed: ${health.reason}`);
+    }
+
     headers["Authorization"] = `Bearer ${token}`;
   }
 
   // Log the full outbound request before it goes out
   const requestMeta = { method, url, headers: { ...headers }, body: body ?? undefined };
   if (requiresAuth) {
-    // Show where the Bearer came from so the flow is clear
     requestMeta["__note"] =
       "Bearer is the OIDC access_token from the PingOne session — " +
-      "the agent forwards the user's credential; no separate agent OAuth required.";
+      "the agent forwards the user's credential; no separate agent OAuth required. " +
+      "Signature validation happens server-side; the browser only checks 'exp' and 'aud'.";
   }
   logToolEvent(`[API] ${method} ${url}\n${JSON.stringify(requestMeta, null, 2)}`, "call");
 
@@ -257,11 +313,29 @@ async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
   });
 
   if (!resp.ok) {
+    // Surface auth rejections explicitly — these come from the backend, not the tool
+    if (resp.status === 401) {
+      throw new Error(
+        `[401 Unauthorized] Backend rejected the Bearer token. ` +
+        `Likely causes: expired, wrong audience, or invalid signature. ` +
+        `This is the server-side trust boundary — the browser pre-flight only catches ` +
+        `what can be read from the JWT payload without a JWKS.`
+      );
+    }
+    if (resp.status === 403) {
+      throw new Error(
+        `[403 Forbidden] Backend accepted the token identity but denied the action. ` +
+        `Likely cause: missing required scope (e.g. 'checkout:write') or ` +
+        `insufficient permissions for this client_id.`
+      );
+    }
+
     // For the demo checkout POST there is no real server — simulate a 200
     if (method === "POST") {
       logToolEvent(`[API] No backend at ${url} — returning simulated 200 (demo mode)`, "warn");
       return null; // caller will synthesise the response
     }
+
     throw new Error(`API ${method} ${url} → ${resp.status} ${resp.statusText}`);
   }
 
