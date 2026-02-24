@@ -212,11 +212,12 @@ function registerToolsWithNativeModelContext() {
 }
 
 function registerTool(name, descriptor, handler) {
-  toolRegistry[name] = { descriptor, handler };
+  const instrumentedHandler = createInstrumentedToolHandler(name, handler);
+  toolRegistry[name] = { descriptor, handler: instrumentedHandler, rawHandler: handler };
 
   const modelContext = ensureModelContextShim();
   if (modelContext?.__shopMcpShim && modelContext.registerTool) {
-    modelContext.registerTool(name, descriptor, handler);
+    modelContext.registerTool(name, descriptor, instrumentedHandler);
   }
 
   registerToolsWithNativeModelContext();
@@ -427,6 +428,74 @@ function logToolCall(name, args, result) {
   log.scrollTop = log.scrollHeight;
 }
 
+function stringifyForLog(data) {
+  try {
+    return JSON.stringify(data, null, 2);
+  } catch {
+    return String(data);
+  }
+}
+
+function sanitizeRequestForLog(rawRequest) {
+  if (!rawRequest || typeof rawRequest !== "object") return rawRequest;
+  if (!("__shopMcpMeta" in rawRequest)) return rawRequest;
+
+  const copy = { ...rawRequest };
+  delete copy.__shopMcpMeta;
+  return copy;
+}
+
+function normalizeToolInvocation(rawRequest) {
+  const request = rawRequest ?? {};
+  const source = request?.__shopMcpMeta?.source || "navigator.modelContext";
+
+  if (request && typeof request === "object") {
+    if (request.arguments && typeof request.arguments === "object") {
+      return { source, args: request.arguments, requestForLog: sanitizeRequestForLog(request) };
+    }
+    if (request.params && typeof request.params === "object") {
+      return { source, args: request.params, requestForLog: sanitizeRequestForLog(request) };
+    }
+    if (request.input && typeof request.input === "object") {
+      return { source, args: request.input, requestForLog: sanitizeRequestForLog(request) };
+    }
+  }
+
+  return { source, args: request, requestForLog: sanitizeRequestForLog(request) };
+}
+
+function createInstrumentedToolHandler(name, handler) {
+  return async (rawRequest = {}) => {
+    const { source, args, requestForLog } = normalizeToolInvocation(rawRequest);
+    const started = Date.now();
+
+    logToolEvent(
+      `→ [${source}] ${name} request: ${stringifyForLog(requestForLog)}`,
+      "call"
+    );
+
+    if (requestForLog !== args) {
+      logToolEvent(
+        `→ [${source}] ${name} args: ${stringifyForLog(args)}`,
+        "call"
+      );
+    }
+
+    try {
+      const result = await handler(args);
+      logToolEvent(
+        `← [${source}] ${name} response (${Date.now() - started}ms): ${stringifyForLog(result)}`,
+        "result"
+      );
+      return result;
+    } catch (err) {
+      const message = err?.message || String(err);
+      logToolEvent(`← [${source}] ${name} error: ${message}`, "error");
+      throw err;
+    }
+  };
+}
+
 async function invokeTool(name, args = {}) {
   const tool = toolRegistry[name];
   if (!tool) {
@@ -434,8 +503,10 @@ async function invokeTool(name, args = {}) {
     return;
   }
   try {
-    const result = await tool.handler(args);
-    logToolCall(name, args, result);
+    await tool.handler({
+      __shopMcpMeta: { source: "ui" },
+      arguments: args,
+    });
   } catch (err) {
     logToolEvent(`Tool error: ${err.message}`, "error");
   }
@@ -525,8 +596,10 @@ function renderProducts() {
   grid.querySelectorAll(".btn-add-to-cart").forEach(btn => {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.productId;
-      const result = await toolRegistry["add_to_cart"].handler({ product_id: id, quantity: 1 });
-      logToolCall("add_to_cart", { product_id: id, quantity: 1 }, result);
+      await toolRegistry["add_to_cart"].handler({
+        __shopMcpMeta: { source: "ui" },
+        arguments: { product_id: id, quantity: 1 },
+      });
       btn.textContent = "Added ✓";
       setTimeout(() => { btn.textContent = "Add to cart"; }, 1200);
     });
