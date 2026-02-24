@@ -271,15 +271,17 @@ async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
   const headers = { "Content-Type": "application/json" };
 
   if (requiresAuth) {
-    const token = sessionStorage.getItem("access_token") ||
-                  sessionStorage.getItem("id_token");
+    // access_token is the correct Bearer credential for resource servers.
+    // id_token is an identity assertion for the client only — sending it as
+    // a Bearer to an API is wrong and the RS will reject it.
+    const token = sessionStorage.getItem("access_token");
 
     // 1. Existence check (browser can do this)
     if (!token) {
       throw new Error(
-        "No token in sessionStorage — user must sign in before calling a protected tool. " +
-        "(Contrast with MCP Server: the server would return 401 on the transport; " +
-        "here the tool detects the gap before the fetch even leaves the browser.)"
+        "No access_token in sessionStorage — user must sign in before calling a protected tool. " +
+        "Note: the id_token is intentionally NOT used here; it is an identity assertion for " +
+        "the client only and resource servers will reject it as a Bearer credential."
       );
     }
 
