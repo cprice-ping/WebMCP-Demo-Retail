@@ -4,10 +4,10 @@
 
 const CONFIG = {
   // Your PingOne Application Client ID
-  PINGONE_CLIENT_ID: "YOUR_CLIENT_ID_HERE",
+  PINGONE_CLIENT_ID: "1e9994ca-366d-4954-b1d8-32c3506e9641",
 
   // Your PingOne Environment ID
-  PINGONE_ENVIRONMENT_ID: "YOUR_ENVIRONMENT_ID_HERE",
+  PINGONE_ENVIRONMENT_ID: "3f720e3e-ceb4-43a7-bb45-45b05eb26280",
 
   // Redirect URI — must match what's registered in PingOne
   // For local dev: http://localhost:8080
