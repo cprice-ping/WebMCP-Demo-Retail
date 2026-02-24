@@ -883,8 +883,11 @@ async function handleCallback() {
   return true;
 }
 
-function mountApp() {
-  renderProducts();
+async function mountApp() {
+  // Use the tool to load products — same code path as an agent call.
+  // This means the API fetch, logging, and error handling are unified
+  // whether the caller is the webapp itself or an MCP agent.
+  await invokeTool("view_products");
   renderCart();
 
   const name = idTokenClaims?.name || idTokenClaims?.preferred_username || idTokenClaims?.email || idTokenClaims?.sub || "User";
