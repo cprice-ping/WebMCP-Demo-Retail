@@ -419,6 +419,10 @@ registerTool(
     description: "Fetches the product catalog from the backend API. Requires an active user session.",
     parameters: {},
     annotations: { readOnlyHint: true },
+    ui: {
+      labels: [{text:"GET"}, {text:"API", cls:"tool-label-api"}],
+      desc: "GET <code>/api/products.json</code> — fetches catalog from the backend.",
+    },
   },
   async () => {
     const sessionError = requireSession();
@@ -449,6 +453,11 @@ registerTool(
       },
       required: ["product_id", "quantity"],
     },
+    ui: {
+      labels: [{text:"MUTATE", cls:"tool-label-mutate"}],
+      desc: "Adds a product to the cart by product ID and quantity.",
+      inputs: true,
+    },
   },
   async ({ product_id, quantity }) => {
     const sessionError = requireSession();
@@ -475,6 +484,10 @@ registerTool(
     description: "Returns the current cart contents and total as JSON. Requires an active user session.",
     parameters: {},
     annotations: { readOnlyHint: true },
+    ui: {
+      labels: [{text:"GET"}],
+      desc: "Returns current cart items, item count, and total as JSON.",
+    },
   },
   async () => {
     const sessionError = requireSession();
@@ -492,6 +505,10 @@ registerTool(
   {
     description: "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. Requires an active user session and user confirmation via elicitation before the request is sent. Returns an error if the user is not signed in or the cart is empty.",
     parameters: {},
+    ui: {
+      labels: [{text:"ELICIT", cls:"tool-label-confirm"}, {text:"API", cls:"tool-label-api"}, {text:"BEARER", cls:"tool-label-auth"}],
+      desc: "POST <code>/api/checkout</code> — elicits confirmation, then calls the API with <code>Authorization: Bearer &lt;access_token&gt;</code>.",
+    },
   },
   async (args, client) => {
     const sessionError = requireSession();
@@ -537,10 +554,43 @@ registerTool(
 // Cart helpers
 // ============================================================
 
-// Update the tool count badge now that all tools are registered
+// Update the tool count badge and generate tool cards from the registry.
+// This is the single source of truth — adding/removing a registerTool() call
+// automatically updates both the badge and the UI card list.
 document.addEventListener("DOMContentLoaded", () => {
+  // Badge
   const badge = document.getElementById("tool-count-badge");
   if (badge) badge.textContent = `${Object.keys(toolRegistry).length} tools registered`;
+
+  // Login footnote scope — driven from CONFIG, not hardcoded
+  const footnote = document.getElementById("login-scope");
+  if (footnote) footnote.textContent = CONFIG.PINGONE_SCOPES;
+
+  // Tool cards
+  const list = document.getElementById("tool-list");
+  if (!list) return;
+
+  list.innerHTML = Object.entries(toolRegistry).map(([name, value]) => {
+    const ui = value.descriptor?.ui || {};
+    const labels = (ui.labels || []).map(l =>
+      `<span class="tool-label ${l.cls || ""}">${l.text}</span>`
+    ).join("");
+    const inputs = ui.inputs ? `
+      <div class="tool-inputs">
+        <label>Product ID<select id="tool-product-id"></select></label>
+        <label>Qty<input id="tool-qty" type="number" value="1" min="1" max="10" /></label>
+      </div>` : "";
+    return `
+      <div class="tool-card">
+        <div class="tool-header">
+          <code class="tool-name">${name}</code>
+          ${labels}
+        </div>
+        <p class="tool-desc">${ui.desc || value.descriptor?.description || ""}</p>
+        ${inputs}
+        <button class="btn-tool" data-tool="${name}">Call tool</button>
+      </div>`;
+  }).join("");
 });
 
 function cartSummary() {

@@ -38,7 +38,7 @@
         </button>
 
         <p class="login-footnote">
-          Auth via PingOne OIDC &mdash; <code>openid profile</code>
+          Auth via PingOne OIDC &mdash; <code id="login-scope"></code>
         </p>
       </div>
     </div>
@@ -141,71 +141,8 @@
             invoke these via <code>navigator.modelContext</code>.
           </p>
 
-          <div class="tool-list">
-
-            <!-- view_products -->
-            <div class="tool-card">
-              <div class="tool-header">
-                <code class="tool-name">view_products</code>
-                <span class="tool-label">GET</span>
-                <span class="tool-label tool-label-api">API</span>
-              </div>
-              <p class="tool-desc">GET <code>/api/products.json</code> — fetches catalog from the backend. No auth required.</p>
-              <button class="btn-tool" data-tool="view_products">
-                Call tool
-              </button>
-            </div>
-
-            <!-- add_to_cart -->
-            <div class="tool-card">
-              <div class="tool-header">
-                <code class="tool-name">add_to_cart</code>
-                <span class="tool-label tool-label-mutate">MUTATE</span>
-              </div>
-              <p class="tool-desc">Adds an item to the cart by product ID and quantity.</p>
-              <div class="tool-inputs">
-                <label>
-                  Product ID
-                  <select id="tool-product-id">
-                    <!-- Populated by JS -->
-                  </select>
-                </label>
-                <label>
-                  Qty
-                  <input id="tool-qty" type="number" value="1" min="1" max="10" />
-                </label>
-              </div>
-              <button class="btn-tool" data-tool="add_to_cart">
-                Call tool
-              </button>
-            </div>
-
-            <!-- view_cart -->
-            <div class="tool-card">
-              <div class="tool-header">
-                <code class="tool-name">view_cart</code>
-                <span class="tool-label">GET</span>
-              </div>
-              <p class="tool-desc">Returns current cart items, item count, and total as JSON.</p>
-              <button class="btn-tool" data-tool="view_cart">
-                Call tool
-              </button>
-            </div>
-
-            <!-- checkout -->
-            <div class="tool-card">
-              <div class="tool-header">
-                <code class="tool-name">checkout</code>
-                <span class="tool-label tool-label-confirm">ELICIT</span>
-                <span class="tool-label tool-label-api">API</span>
-                <span class="tool-label tool-label-auth">BEARER</span>
-              </div>
-              <p class="tool-desc">POST <code>/api/checkout</code> — elicits user confirmation, then calls the API with <code>Authorization: Bearer &lt;access_token&gt;</code>.</p>
-              <button class="btn-tool" data-tool="checkout">
-                Call tool
-              </button>
-            </div>
-
+          <div id="tool-list" class="tool-list">
+            <!-- Generated from toolRegistry by app.js -->
           </div>
 
           <!-- Tool output log -->
