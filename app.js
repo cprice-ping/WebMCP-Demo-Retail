@@ -78,6 +78,34 @@ async function startLogin() {
   window.location.href = `${CONFIG.PINGONE_AS_BASE}/authorize?${params}`;
 }
 
+// Silent token refresh using prompt=none.
+// The AS checks its own session cookie (longer-lived than our id_token) and
+// issues fresh tokens without showing the user any UI.
+// If the AS session is also expired it returns error=login_required, which we
+// catch and handle by falling back to the interactive login screen.
+async function startSilentLogin() {
+  const verifier = randomBase64url(64);
+  const challenge = await sha256Base64url(verifier);
+
+  sessionStorage.setItem("pkce_verifier", verifier);
+  sessionStorage.setItem("oauth_state", randomBase64url(16));
+  sessionStorage.setItem("silent_refresh", "1");
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: CONFIG.PINGONE_CLIENT_ID,
+    redirect_uri: CONFIG.PINGONE_REDIRECT_URI,
+    scope: CONFIG.PINGONE_SCOPES,
+    state: sessionStorage.getItem("oauth_state"),
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    nonce: randomBase64url(16),
+    prompt: "none",          // do not show any login UI
+  });
+
+  window.location.href = `${CONFIG.PINGONE_AS_BASE}/authorize?${params}`;
+}
+
 // Exchange auth code for tokens
 async function exchangeCode(code) {
   const verifier = sessionStorage.getItem("pkce_verifier");
@@ -878,9 +906,19 @@ async function handleCallback() {
   const error = params.get("error");
 
   if (error) {
-    logToolEvent(`Auth error: ${error} — ${params.get("error_description")}`, "error");
-    showView("login");
-    return;
+    // login_required / interaction_required mean the AS session is also gone.
+    // Any other error is unexpected — log it either way.
+    const wasSilent = sessionStorage.getItem("silent_refresh");
+    sessionStorage.removeItem("silent_refresh");
+    if (wasSilent && (error === "login_required" || error === "interaction_required")) {
+      // Silent refresh failed — AS cookie is gone too. Show the login screen.
+      sessionStorage.clear();
+      showView("login");
+    } else {
+      logToolEvent(`Auth error: ${error} — ${params.get("error_description")}`, "error");
+      showView("login");
+    }
+    return true;
   }
 
   if (!code) return false; // not a callback
@@ -890,7 +928,7 @@ async function handleCallback() {
   if (state !== storedState) {
     console.warn("State mismatch — possible CSRF");
     showView("login");
-    return;
+    return true;
   }
 
   // Clean URL
@@ -903,6 +941,7 @@ async function handleCallback() {
 
     sessionStorage.setItem("id_token", idTokenRaw);
     sessionStorage.setItem("access_token", tokens.access_token || "");
+    sessionStorage.removeItem("silent_refresh"); // clear flag whether login was silent or interactive
 
     mountApp();
   } catch (err) {
@@ -963,10 +1002,13 @@ async function boot() {
     idTokenRaw = storedToken;
     idTokenClaims = parseJwt(storedToken);
 
-    // Basic expiry check
+    // id_token is expired — but the IdP session cookie may still be valid
+    // (it's longer-lived than the JWT). Try a silent token refresh first.
+    // If the IdP cookie is also gone, the AS returns login_required and
+    // handleCallback will fall back to the interactive login screen.
     if (idTokenClaims?.exp && idTokenClaims.exp * 1000 < Date.now()) {
       sessionStorage.clear();
-      showView("login");
+      await startSilentLogin();
       return;
     }
 
