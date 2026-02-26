@@ -6,16 +6,10 @@
 "use strict";
 
 // ------------------------------------------------------------
-// Product catalog (in-memory, immutable)
+// Product catalog — populated from api/products.json via view_products tool.
+// Do not add products here; api/products.json is the source of truth.
 // ------------------------------------------------------------
-const PRODUCTS = [
-  { id: "p1", name: "Wireless Headphones",    price: 79.99,  emoji: "🎧", description: "Noise-cancelling, 30hr battery" },
-  { id: "p2", name: "Mechanical Keyboard",     price: 129.99, emoji: "⌨️", description: "Tactile switches, USB-C" },
-  { id: "p3", name: "USB-C Hub",               price: 34.99,  emoji: "🔌", description: "7-in-1, 4K HDMI, 100W PD" },
-  { id: "p4", name: "Webcam HD 1080p",         price: 59.99,  emoji: "📷", description: "Auto-focus, built-in mic" },
-  { id: "p5", name: "Desk LED Lamp",           price: 24.99,  emoji: "💡", description: "Adjustable color temp" },
-  { id: "p6", name: "Laptop Stand",            price: 39.99,  emoji: "💻", description: "Aluminium, foldable" },
-];
+const PRODUCTS = [];
 
 // ------------------------------------------------------------
 // In-memory cart state
@@ -428,12 +422,9 @@ registerTool(
     const sessionError = requireSession();
     if (sessionError) return sessionError;
     const data = await apiRequest("GET", "/products.json");
-    // Keep in-memory PRODUCTS in sync so the UI always works
     if (data?.products) {
       PRODUCTS.length = 0;
-      data.products.forEach(p => {
-        PRODUCTS.push({ ...p, emoji: ["🎧","⌨️","🔌","📷","💡","💻"][PRODUCTS.length] || "📦" });
-      });
+      data.products.forEach(p => PRODUCTS.push({ ...p, emoji: p.emoji || "📦" }));
       renderProducts();
     }
     return data;
