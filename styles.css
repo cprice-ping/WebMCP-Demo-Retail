@@ -233,6 +233,22 @@ code, .mono {
   gap: 0;
   min-height: calc(100vh - 52px);
   align-items: start;
+  transition: grid-template-columns .2s ease;
+}
+
+.app-layout.inspector-hidden {
+  grid-template-columns: 1fr 0;
+}
+
+.inspector-column {
+  transition: opacity .2s ease;
+}
+
+.inspector-column.inspector-hidden {
+  opacity: 0;
+  pointer-events: none;
+  overflow: hidden;
+  width: 0;
 }
 
 /* ------------------------------------------------------------

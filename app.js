@@ -906,6 +906,26 @@ function showView(name) {
 
 document.getElementById("btn-login").addEventListener("click", startLogin);
 
+// Tools pane toggle
+(function () {
+  const btn = document.getElementById("btn-toggle-inspector");
+  const layout = document.querySelector(".app-layout");
+  const aside  = document.querySelector(".inspector-column");
+  const hidden = sessionStorage.getItem("inspector_hidden") === "1";
+
+  function applyState(isHidden) {
+    layout.classList.toggle("inspector-hidden", isHidden);
+    aside.classList.toggle("inspector-hidden", isHidden);
+    btn.textContent = isHidden ? "Show Tools" : "Hide Tools";
+    sessionStorage.setItem("inspector_hidden", isHidden ? "1" : "0");
+  }
+
+  applyState(hidden); // restore last state
+  btn.addEventListener("click", () => {
+    applyState(!layout.classList.contains("inspector-hidden"));
+  });
+}());
+
 document.getElementById("btn-logout").addEventListener("click", () => {
   sessionStorage.clear();
   idTokenClaims = null;
