@@ -219,23 +219,30 @@
           <div class="panel-header">
             <span class="panel-icon">🔑</span>
             <h3>Token Inspector</h3>
+            <span class="panel-badge panel-badge-api">Access Token</span>
             <span class="panel-badge panel-badge-key">ID Token</span>
           </div>
           <p class="panel-desc">
             Decoded JWT claims from the active PingOne session.
-            The highlighted claim is the agent identity signal.
+            The <strong>access_token</strong> is what tools forward as a Bearer credential.
+            The <strong>id_token</strong> carries identity claims for the UI session.
           </p>
 
           <div class="token-highlight-box">
-            <div class="highlight-label">Agent Identity Signal</div>
+            <div class="highlight-label">Access Token — Agent Identity Signal</div>
             <div class="highlight-content">
-              <span class="claim-key">aud / client_id</span>
-              <span id="token-client-id" class="claim-value claim-value-highlight">—</span>
+              <span class="claim-key">aud</span>
+              <span id="token-at-aud" class="claim-value claim-value-highlight">—</span>
+            </div>
+            <div class="highlight-content" style="margin-top:.4rem">
+              <span class="claim-key">client_id</span>
+              <span id="token-at-client-id" class="claim-value claim-value-highlight">—</span>
             </div>
             <p class="highlight-note">
-              This <code>client_id</code> identifies which application (agent)
-              obtained the token. No additional agent credential required —
-              the signal is already here.
+              The RS validates <code>aud</code> (is this token intended for me?) and
+              <code>client_id</code> (which application obtained it?). The
+              <code>client_id</code> is the agent identity signal — no separate agent
+              credential required.
             </p>
           </div>
 
@@ -244,7 +251,8 @@
               <span class="step-num">1</span>
               <div>
                 User authenticates via PingOne OIDC.
-                Session established with signed ID token.
+                Both an <code>id_token</code> (identity) and
+                <code>access_token</code> (credential) are issued.
               </div>
             </div>
             <div class="narrative-step">
@@ -257,17 +265,24 @@
             <div class="narrative-step">
               <span class="step-num">3</span>
               <div>
-                The <code>client_id</code> in the token tells you
-                this request came through this specific agent.
-                <strong>That's enough.</strong>
+                The RS receives the <code>access_token</code> as Bearer.
+                It validates <code>aud</code>, <code>client_id</code>, and
+                <code>scope</code>. The <code>client_id</code> is the agent signal.
+                <strong>No extra credential needed.</strong>
               </div>
             </div>
           </div>
 
           <div class="claims-section">
-            <div class="claims-header">All claims</div>
-            <div id="claims-table" class="claims-table">
-              <!-- Populated by JS -->
+            <div class="token-tabs">
+              <button class="token-tab token-tab-active" data-tab="at">Access Token <span class="token-tab-badge">Bearer</span></button>
+              <button class="token-tab" data-tab="it">ID Token <span class="token-tab-badge">Session</span></button>
+            </div>
+            <div id="tab-at">
+              <div id="at-claims-table" class="claims-table"><!-- Populated by JS --></div>
+            </div>
+            <div id="tab-it" class="hidden">
+              <div id="it-claims-table" class="claims-table"><!-- Populated by JS --></div>
             </div>
           </div>
         </section>

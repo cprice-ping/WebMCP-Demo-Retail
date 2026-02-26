@@ -785,42 +785,59 @@ document.addEventListener("click", async (e) => {
 // Token inspector
 // ============================================================
 
-function renderTokenInspector(claims, rawToken) {
-  // Highlight the client_id
-  const clientId = claims.aud || claims.client_id || CONFIG.PINGONE_CLIENT_ID;
-  const displayClientId = Array.isArray(clientId) ? clientId.join(", ") : String(clientId);
-  document.getElementById("token-client-id").textContent = displayClientId;
+function renderTokenInspector(idClaims, idRaw, atClaims, atRaw) {
+  // Access token — the operative credential for tools and APIs
+  const atAud      = atClaims?.aud ? [].concat(atClaims.aud).join(", ") : "(not present)";
+  const atClientId = atClaims?.client_id || atClaims?.azp || "(not present)";
+  document.getElementById("token-at-aud").textContent      = atAud;
+  document.getElementById("token-at-client-id").textContent = atClientId;
 
-  // Claims table
-  const table = document.getElementById("claims-table");
+  // Helper: render a sorted claims object into a table element
+  function buildClaimsTable(claims, tableId, highlightKeys) {
+    const table = document.getElementById(tableId);
+    if (!claims || !table) return;
 
-  // Priority claims to show first and highlight
-  const priority = ["iss", "sub", "aud", "client_id", "iat", "exp", "nonce", "name", "email", "given_name", "family_name"];
+    const priority = ["iss", "sub", "aud", "client_id", "azp", "iat", "exp", "scope", "nonce", "name", "email", "given_name", "family_name"];
+    const sorted = [
+      ...priority.filter(k => k in claims),
+      ...Object.keys(claims).filter(k => !priority.includes(k)),
+    ];
 
-  const sorted = [
-    ...priority.filter(k => k in claims),
-    ...Object.keys(claims).filter(k => !priority.includes(k)),
-  ];
+    table.innerHTML = sorted.map(key => {
+      const val = claims[key];
+      const isHighlighted = highlightKeys.includes(key);
+      const displayVal = typeof val === "object" ? JSON.stringify(val) : String(val);
 
-  table.innerHTML = sorted.map(key => {
-    const val = claims[key];
-    const isHighlighted = key === "aud" || key === "client_id";
-    const displayVal = typeof val === "object" ? JSON.stringify(val) : String(val);
+      let formatted = displayVal;
+      if ((key === "iat" || key === "exp" || key === "auth_time") && typeof val === "number") {
+        const d = new Date(val * 1000);
+        formatted = `${displayVal} (${d.toLocaleString()})`;
+      }
 
-    // Format timestamps
-    let formatted = displayVal;
-    if ((key === "iat" || key === "exp" || key === "auth_time") && typeof val === "number") {
-      const d = new Date(val * 1000);
-      formatted = `${displayVal} (${d.toLocaleString()})`;
-    }
+      return `
+        <div class="claim-row ${isHighlighted ? "claim-row-highlight" : ""}">
+          <span class="claim-key">${key}</span>
+          <span class="claim-value ${isHighlighted ? "claim-value-highlight" : ""}">${formatted}</span>
+        </div>
+      `;
+    }).join("");
+  }
 
-    return `
-      <div class="claim-row ${isHighlighted ? "claim-row-highlight" : ""}">
-        <span class="claim-key">${key}</span>
-        <span class="claim-value ${isHighlighted ? "claim-value-highlight" : ""}">${formatted}</span>
-      </div>
-    `;
-  }).join("");
+  // AT: highlight aud (RS target) and client_id (agent signal)
+  buildClaimsTable(atClaims, "at-claims-table", ["aud", "client_id", "azp", "scope"]);
+  // IT: highlight sub (user identity) and aud/client_id
+  buildClaimsTable(idClaims, "it-claims-table", ["sub", "aud", "client_id"]);
+
+  // Wire tab switching
+  document.querySelectorAll(".token-tab").forEach(btn => {
+    btn.addEventListener("click", () => {
+      const tab = btn.dataset.tab;
+      document.querySelectorAll(".token-tab").forEach(b => b.classList.remove("token-tab-active"));
+      btn.classList.add("token-tab-active");
+      document.getElementById("tab-at").classList.toggle("hidden", tab !== "at");
+      document.getElementById("tab-it").classList.toggle("hidden", tab !== "it");
+    });
+  });
 }
 
 // ============================================================
@@ -967,7 +984,12 @@ async function mountApp() {
   const name = idTokenClaims?.name || idTokenClaims?.preferred_username || idTokenClaims?.email || idTokenClaims?.sub || "User";
   document.getElementById("nav-username").textContent = name;
 
-  renderTokenInspector(idTokenClaims, idTokenRaw);
+  renderTokenInspector(
+    idTokenClaims,
+    idTokenRaw,
+    parseJwt(sessionStorage.getItem("access_token")),
+    sessionStorage.getItem("access_token")
+  );
 
   showView("app");
 

@@ -743,6 +743,60 @@ code, .mono {
   margin-bottom: .35rem;
 }
 
+/* Token tabs */
+
+.token-tabs {
+  display: flex;
+  gap: 2px;
+  margin-bottom: .5rem;
+}
+
+.token-tab {
+  flex: 1;
+  padding: .35rem .6rem;
+  font-size: .75rem;
+  font-weight: 600;
+  border: 1px solid var(--ping-border);
+  border-radius: var(--radius) var(--radius) 0 0;
+  background: var(--ping-gray);
+  color: var(--ping-muted);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: .4rem;
+  transition: background .15s, color .15s;
+}
+
+.token-tab:hover {
+  background: #e8edf5;
+  color: var(--ping-text);
+}
+
+.token-tab-active {
+  background: #fff;
+  color: var(--ping-text);
+  border-bottom-color: #fff;
+  position: relative;
+  z-index: 1;
+}
+
+.token-tab-badge {
+  font-size: .6rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .06em;
+  padding: 1px 5px;
+  border-radius: 3px;
+  background: var(--ping-border);
+  color: var(--ping-muted);
+}
+
+.token-tab-active .token-tab-badge {
+  background: var(--ping-blue);
+  color: #fff;
+}
+
 .claims-table {
   display: flex;
   flex-direction: column;
