@@ -69,11 +69,15 @@ async function getWorkerToken() {
  * Send a decision request to PingOne Authorize.
  *
  * @param {object} userClaims   Decoded access_token payload from the user's AT
- * @param {object} order        { items: [...], total: number }
+ * @param {object} context      Free-form object passed as `parameters` to the policy.
+ *                              The caller shapes this to match what the policy expects.
+ *                              A `user` key is always injected from userClaims — the
+ *                              caller can override individual fields by including a
+ *                              `user` key in context (it will be merged, not replaced).
  * @returns {Promise<object>}   PingOne Authorize response
  *                              { decision: "PERMIT" | "DENY", statements: [...] }
  */
-export async function requestDecision(userClaims, order) {
+export async function requestDecision(userClaims, context = {}) {
   const envId      = process.env.PINGONE_ENVIRONMENT_ID;
   const endpointId = process.env.AZ_DECISION_ENDPOINT_ID;
 
@@ -85,23 +89,22 @@ export async function requestDecision(userClaims, order) {
 
   const workerToken = await getWorkerToken();
 
-  // Build the parameters block for the Authorize policy.
-  // Attribute names here must match what your policy expects.
+  // Always inject a standard `user` block from the validated AT claims so every
+  // policy has consistent identity context without the caller needing to add it.
+  // Destructure `user` out of context so the top-level spread doesn't overwrite
+  // the merged user block. Caller-supplied user fields merge on top of the base.
+  const { user: callerUser = {}, ...rest } = context;
   const parameters = {
-    // Identity context — lets the policy ask "who is this user / which app?"
     user: {
       id:        userClaims.sub,
       client_id: userClaims.client_id ?? userClaims.azp ?? null,
       scope:     userClaims.scope ?? "",
+      ...callerUser,   // caller can add / override individual user fields
     },
-    // Order context — lets the policy apply risk rules (e.g. flag high-value orders)
-    order: {
-      total:      order.total,
-      item_count: order.items?.length ?? 0,
-    },
+    ...rest,           // all other caller-supplied context keys passed through
   };
 
-  console.log(`[AZ] Decision request — user: ${userClaims.sub}, total: ${order.total}`);
+  console.log(`[AZ] Decision request — user: ${userClaims.sub}`);
   console.log(`[AZ] Parameters: ${JSON.stringify(parameters)}`);
 
   const resp = await fetch(
