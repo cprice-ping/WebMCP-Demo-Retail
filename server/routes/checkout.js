@@ -57,6 +57,10 @@ router.post("/", async (req, res) => {
   const azParameters = {
     "order.total":      String(total ?? 0),
     "order.item_count": String(items.length),
+    // client_id identifies which app / agent triggered this checkout.
+    // Lets the P1AZ policy make decisions based on the calling application,
+    // independently of who the user is (user identity comes via userContext).
+    "client_id":        claims.client_id ?? claims.azp ?? "",
   };
 
   let decision;
