@@ -8,23 +8,25 @@
 //
 // Agent Identity Signal
 // ─────────────────────
-// When an MCP agent invokes a tool it forwards the user's access_token.
-// That token carries two signals that tell P1AZ *who is acting*:
+// In WebMCP the agent (Gemini sidecar, MCP Tool Explorer, etc.) invokes tools
+// inside the user's browser tab and forwards the user's existing access_token.
+// That token carries everything P1AZ needs to answer "who is acting?":
 //
-//   userContext.user.id   — the PingOne user UUID (from sub)
-//                           → policy can condition on the individual user
+//   userContext.user.id   — PingOne user UUID (from AT `sub`)
+//                           → policy conditions on the individual user
 //
-//   agent.client_id       — the OAuth app that obtained the token
-//                           → policy can condition on which application/agent
-//                             triggered the action (e.g. allow browser UI but
-//                             require extra step for an autonomous agent)
+//   agent.client_id       — OAuth client_id of the application that obtained
+//                           the token (from AT `client_id` / `azp`).
+//                           This IS the agent identity signal. The RS validates
+//                           it to answer "which application is acting?"
+//                           No separate agent credential is required —
+//                           the user's session token carries the signal.
 //
-//   agent.scope           — scopes granted to that client for this session
-//                           → policy can enforce "checkout:write" is present
+//   agent.scope           — Scopes granted to that client for this session.
+//                           Lets the policy enforce permission presence.
 //
 // Use agentIdentityParameters(claims) to get these as a ready-to-spread
-// object for the `parameters` block, then add your action-specific
-// attributes alongside:
+// object for the `parameters` block, then add action-specific attributes:
 //
 //   const params = {
 //     ...agentIdentityParameters(claims),
@@ -39,22 +41,23 @@ const P1_API  = "https://api.pingone.com/v1";
 /**
  * Build the standard agent identity parameters from a validated AT payload.
  *
- * These are the parameters your P1AZ policy can condition on to answer
- * "which application / agent triggered this action?" separately from
- * "who is the user?" (which comes from userContext).
+ * In WebMCP the agent operates inside the user's browser tab and forwards
+ * the user's access_token. The `client_id` claim in that token is the agent
+ * identity signal — it tells the RS (and P1AZ) which application obtained
+ * the token. No separate agent credential is required.
  *
- * Parameter names used here:
- *   agent.client_id  — OAuth client_id of the application that holds the token.
- *                      In a WebMCP scenario this identifies the browser app /
- *                      agent; an autonomous agent using a different client would
- *                      show a different value here.
- *   agent.scope      — Space-separated scopes granted to this client for the
- *                      current session. Lets the policy enforce scope presence.
+ * These parameters give your P1AZ policy consistent, named attributes to
+ * condition on for every tool call:
  *
- * Spread into your azParameters before adding action-specific attributes:
+ *   agent.client_id  — which application / agent context is acting
+ *   agent.scope      — what permissions were granted to it
+ *
+ * User identity (who) is handled separately via userContext.user.id.
+ *
+ * Spread into azParameters before adding action-specific attributes:
  *   const params = { ...agentIdentityParameters(claims), "order.total": "99" };
  *
- * @param {object} claims  Decoded AT payload (already validated via validateAccessToken)
+ * @param {object} claims  Decoded, validated AT payload
  * @returns {object}       Flat key-value pairs ready for the `parameters` block
  */
 export function agentIdentityParameters(claims) {
