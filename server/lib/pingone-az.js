@@ -4,18 +4,65 @@
 // Uses a Worker Application (client_credentials) to obtain a
 // short-lived token for calling the decision endpoint.
 // The worker token is cached in memory and refreshed automatically
-// when it nears expiry — avoids a token request on every checkout.
+// when it nears expiry — avoids a new credentials call on every request.
 //
-// The user's AT claims are forwarded as policy context so the
-// Authorize policy can condition decisions on:
-//   - who the user is (sub)
-//   - which app/agent made the request (client_id / azp)
-//   - what permissions they were granted (scope)
-//   - order attributes (total, item count)
+// Agent Identity Signal
+// ─────────────────────
+// When an MCP agent invokes a tool it forwards the user's access_token.
+// That token carries two signals that tell P1AZ *who is acting*:
+//
+//   userContext.user.id   — the PingOne user UUID (from sub)
+//                           → policy can condition on the individual user
+//
+//   agent.client_id       — the OAuth app that obtained the token
+//                           → policy can condition on which application/agent
+//                             triggered the action (e.g. allow browser UI but
+//                             require extra step for an autonomous agent)
+//
+//   agent.scope           — scopes granted to that client for this session
+//                           → policy can enforce "checkout:write" is present
+//
+// Use agentIdentityParameters(claims) to get these as a ready-to-spread
+// object for the `parameters` block, then add your action-specific
+// attributes alongside:
+//
+//   const params = {
+//     ...agentIdentityParameters(claims),
+//     "order.total": String(total),
+//   };
+//   await requestDecision(claims, params);
 // ============================================================
 
 const P1_BASE = "https://auth.pingone.com";
 const P1_API  = "https://api.pingone.com/v1";
+
+/**
+ * Build the standard agent identity parameters from a validated AT payload.
+ *
+ * These are the parameters your P1AZ policy can condition on to answer
+ * "which application / agent triggered this action?" separately from
+ * "who is the user?" (which comes from userContext).
+ *
+ * Parameter names used here:
+ *   agent.client_id  — OAuth client_id of the application that holds the token.
+ *                      In a WebMCP scenario this identifies the browser app /
+ *                      agent; an autonomous agent using a different client would
+ *                      show a different value here.
+ *   agent.scope      — Space-separated scopes granted to this client for the
+ *                      current session. Lets the policy enforce scope presence.
+ *
+ * Spread into your azParameters before adding action-specific attributes:
+ *   const params = { ...agentIdentityParameters(claims), "order.total": "99" };
+ *
+ * @param {object} claims  Decoded AT payload (already validated via validateAccessToken)
+ * @returns {object}       Flat key-value pairs ready for the `parameters` block
+ */
+export function agentIdentityParameters(claims) {
+  return {
+    "agent.client_id": claims.client_id ?? claims.azp ?? "",
+    "agent.scope":     claims.scope ?? "",
+  };
+}
 
 // In-memory worker token cache
 let _workerToken = null;

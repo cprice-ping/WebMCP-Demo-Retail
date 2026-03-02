@@ -9,7 +9,7 @@
 
 import { Router } from "express";
 import { validateAccessToken } from "../lib/token.js";
-import { requestDecision } from "../lib/pingone-az.js";
+import { requestDecision, agentIdentityParameters } from "../lib/pingone-az.js";
 
 const router = Router();
 
@@ -54,13 +54,14 @@ router.post("/", async (req, res) => {
   // `userContext` carries user identity (handled by requestDecision via claims.sub).
   // `parameters` carries domain context the policy needs to evaluate this action.
   // Key names must match the attribute names defined in your P1AZ policy.
+  // agentIdentityParameters() adds agent.client_id + agent.scope from the AT.
+  // These are the "who is the agent?" signals — separate from the user identity
+  // which flows through userContext. Every tool that calls requestDecision should
+  // spread these in so all policies have a consistent agent signal to work with.
   const azParameters = {
+    ...agentIdentityParameters(claims),
     "order.total":      String(total ?? 0),
     "order.item_count": String(items.length),
-    // client_id identifies which app / agent triggered this checkout.
-    // Lets the P1AZ policy make decisions based on the calling application,
-    // independently of who the user is (user identity comes via userContext).
-    "client_id":        claims.client_id ?? claims.azp ?? "",
   };
 
   let decision;
