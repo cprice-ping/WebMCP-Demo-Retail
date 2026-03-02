@@ -51,18 +51,21 @@ router.post("/", async (req, res) => {
   }
 
   // ── 4. PingOne Authorize decision ───────────────────────────
-  // Build the context this policy needs. Any route calling requestDecision()
-  // passes its own context shape — the user block is always injected by the lib.
-  const azContext = {
-    order: {
-      total:      total ?? 0,
-      item_count: items.length,
-    },
+  // `parameters` keys are flat strings whose names must match what the policy expects.
+  // `userContext` is handled inside requestDecision — user.id = claims.sub.
+  // Add any additional policy attributes your Authorize policy references here,
+  // e.g. the agent's client_id if you want the policy to condition on which app
+  // triggered the checkout.
+  const azParameters = {
+    "order.total":      String(total ?? 0),
+    "order.item_count": String(items.length),
+    "user.client_id":   claims.client_id ?? claims.azp ?? "",
+    "user.scope":       claims.scope ?? "",
   };
 
   let decision;
   try {
-    decision = await requestDecision(claims, azContext);
+    decision = await requestDecision(claims, azParameters);
   } catch (err) {
     console.error(`[checkout] Decision endpoint error: ${err.message}`);
     return res.status(502).json({

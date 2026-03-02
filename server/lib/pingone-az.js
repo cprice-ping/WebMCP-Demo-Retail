@@ -68,44 +68,46 @@ async function getWorkerToken() {
 /**
  * Send a decision request to PingOne Authorize.
  *
- * @param {object} userClaims   Decoded access_token payload from the user's AT
- * @param {object} context      Free-form object passed as `parameters` to the policy.
- *                              The caller shapes this to match what the policy expects.
- *                              A `user` key is always injected from userClaims — the
- *                              caller can override individual fields by including a
- *                              `user` key in context (it will be merged, not replaced).
- * @returns {Promise<object>}   PingOne Authorize response
- *                              { decision: "PERMIT" | "DENY", statements: [...] }
+ * API: POST /environments/{envId}/decisionEndpoints/{endpointId}
+ * Ref: https://developer.pingidentity.com/pingone-api/authorize/authorization-decisions/decision-evaluation/execute-a-decision-request.html
+ *
+ * Body shape:
+ *   {
+ *     "parameters": { "Policy Attribute Name": "value", ... },  // flat; names defined by the policy
+ *     "userContext": { "user": { "id": "<pingone-user-uuid>" } } // separate block; id = sub claim
+ *   }
+ *
+ * @param {object} userClaims   Decoded access_token payload (sub, client_id/azp, scope, etc.)
+ * @param {object} parameters   Flat key-value object whose keys match the policy's attribute names.
+ *                              The caller decides the shape. Values should be strings or numbers.
+ *                              client_id and scope from the AT are not injected automatically —
+ *                              add them here if your policy references them, using whatever
+ *                              name your policy expects (e.g. "user.client_id": claims.client_id).
+ * @returns {Promise<object>}   PingOne Authorize response: { decision, statements, ... }
  */
-export async function requestDecision(userClaims, context = {}) {
+export async function requestDecision(userClaims, parameters = {}) {
   const envId      = process.env.PINGONE_ENVIRONMENT_ID;
   const endpointId = process.env.AZ_DECISION_ENDPOINT_ID;
 
   if (!endpointId) {
-    // No decision endpoint configured — permit everything (demo / local dev mode).
     console.warn("[AZ] AZ_DECISION_ENDPOINT_ID not set — auto-PERMIT (demo mode)");
     return { decision: "PERMIT", statements: [], source: "demo-auto-permit" };
   }
 
   const workerToken = await getWorkerToken();
 
-  // Always inject a standard `user` block from the validated AT claims so every
-  // policy has consistent identity context without the caller needing to add it.
-  // Destructure `user` out of context so the top-level spread doesn't overwrite
-  // the merged user block. Caller-supplied user fields merge on top of the base.
-  const { user: callerUser = {}, ...rest } = context;
-  const parameters = {
-    user: {
-      id:        userClaims.sub,
-      client_id: userClaims.client_id ?? userClaims.azp ?? null,
-      scope:     userClaims.scope ?? "",
-      ...callerUser,   // caller can add / override individual user fields
+  // userContext.user.id is the PingOne user UUID — the `sub` claim of a PingOne
+  // access token is that UUID, so we map directly.
+  const body = {
+    parameters,
+    userContext: {
+      user: { id: userClaims.sub },
     },
-    ...rest,           // all other caller-supplied context keys passed through
   };
 
   console.log(`[AZ] Decision request — user: ${userClaims.sub}`);
-  console.log(`[AZ] Parameters: ${JSON.stringify(parameters)}`);
+  console.log(`[AZ] Body: ${JSON.stringify(body)}`);
+
 
   const resp = await fetch(
     `${P1_API}/environments/${envId}/decisionEndpoints/${endpointId}`,
@@ -115,13 +117,13 @@ export async function requestDecision(userClaims, context = {}) {
         "Content-Type":  "application/json",
         "Authorization": `Bearer ${workerToken}`,
       },
-      body: JSON.stringify({ parameters }),
+      body: JSON.stringify(body),
     }
   );
 
   if (!resp.ok) {
-    const body = await resp.text();
-    throw new Error(`Decision endpoint request failed: ${resp.status} ${body}`);
+    const errText = await resp.text();
+    throw new Error(`Decision endpoint request failed: ${resp.status} ${errText}`);
   }
 
   const result = await resp.json();
