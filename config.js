@@ -28,7 +28,10 @@ const CONFIG = {
     const param = new URLSearchParams(window.location.search).get("apiBase");
     if (param) { sessionStorage.setItem("apiBase", param); return param; }
     const stored = sessionStorage.getItem("apiBase");
-    if (stored) return stored;
+    const onLocalhost = window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1";
+    // Discard a stored localhost URL when running on a remote origin (e.g. GitHub Pages)
+    const storedIsLocal = stored && (stored.includes("localhost") || stored.includes("127.0.0.1"));
+    if (stored && !(storedIsLocal && !onLocalhost)) return stored;
     return "https://webmcp-shopapi.ping-devops.com/api";
   })(),
 };
