@@ -20,14 +20,20 @@ const CONFIG = {
   // OIDC scopes to request
   PINGONE_SCOPES: "openid profile email",
 
-  // Backend API base URL — auto-detected by environment:
-  //   localhost / 127.0.0.1  →  Node.js server (docker-compose up in server/)
-  //   GitHub Pages           →  static api/ files (demo mode, simulated checkout)
-  // To point at a real k8s deployment, replace the third branch with your ingress URL:
-  //   : "https://shopapi.your-domain.com/api"
-  SHOP_API_BASE: (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
-    ? "http://localhost:3000/api"
-    : window.location.origin + window.location.pathname.replace(/\/$/, "") + "/api",
+  // Backend API base URL — resolved in priority order:
+  //   1. ?apiBase=  query parameter  → explicit override (e.g. for local server behind GH Pages)
+  //   2. localhost / 127.0.0.1       → Node.js server via docker-compose
+  //   3. everything else             → static api/ files on GitHub Pages (demo mode)
+  //
+  // Local server behind GitHub Pages:
+  //   https://cprice-ping.github.io/WebMCP-Demo-Retail/?apiBase=http://localhost:3000/api
+  SHOP_API_BASE: (() => {
+    const override = new URLSearchParams(window.location.search).get("apiBase");
+    if (override) return override;
+    if (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1")
+      return "http://localhost:3000/api";
+    return window.location.origin + window.location.pathname.replace(/\/$/, "") + "/api";
+  })(),
 };
 
 // Derived: PingOne authorization server base URL
