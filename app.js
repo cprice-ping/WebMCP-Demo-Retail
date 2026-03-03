@@ -367,11 +367,15 @@ async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
       );
     }
     if (resp.status === 403) {
-      throw new Error(
-        `[403 Forbidden] Backend accepted the token identity but denied the action. ` +
-        `Likely cause: missing required scope (e.g. 'checkout:write') or ` +
-        `insufficient permissions for this client_id.`
-      );
+      // Read the server's JSON body — it contains the P1AZ decision, advice, and user context.
+      // Surface that directly rather than a generic string so the agent/user can see why.
+      let detail;
+      try { detail = await resp.json(); } catch { detail = null; }
+      const msg = detail
+        ? `[403 Forbidden] ${detail.error ?? "Denied"} — decision: ${detail.decision ?? "unknown"}` +
+          (detail.advice?.length ? ` — advice: ${JSON.stringify(detail.advice)}` : "")
+        : `[403 Forbidden] Backend accepted the token identity but denied the action.`;
+      throw new Error(msg);
     }
 
     // For the demo checkout POST there is no real server — simulate a 200

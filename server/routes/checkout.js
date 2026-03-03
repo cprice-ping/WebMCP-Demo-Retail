@@ -76,9 +76,13 @@ router.post("/", async (req, res) => {
   }
 
   if (decision.decision !== "PERMIT") {
-    console.warn(`[checkout] Denied — sub: ${claims.sub}, decision: ${decision.decision}`);
+    const isDeny          = decision.decision === "DENY";
+    const isIndeterminate = decision.decision === "INDETERMINATE";
+    console.warn(`[checkout] Not permitted — sub: ${claims.sub}, decision: ${decision.decision}`);
     return res.status(403).json({
-      error:    "Checkout denied by policy.",
+      error:    isDeny          ? "Checkout denied by policy."
+              : isIndeterminate ? "No policy matched this request — checkout cannot proceed."
+              :                   `Checkout not permitted (decision: ${decision.decision}).`,
       decision: decision.decision,
       // `statements` carries any advice/obligations returned by the Authorize policy
       advice:   decision.statements ?? [],
