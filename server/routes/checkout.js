@@ -45,7 +45,7 @@ router.post("/", async (req, res) => {
   );
 
   // ── 3. Request body ─────────────────────────────────────────
-  const { items, total, otpCode, challengeId } = req.body ?? {};
+  const { items, total, otpCode, deviceAuthenticationId } = req.body ?? {};
   if (!Array.isArray(items) || items.length === 0) {
     return res.status(400).json({ error: "Cart is empty or items is missing." });
   }
@@ -63,8 +63,8 @@ router.post("/", async (req, res) => {
     "WebMCP.orderTotal":     String(total ?? 0),
     "WebMCP.orderItemCount": String(items.length),
     // Second-pass MFA verification — present only when the user supplied an OTP
-    ...(otpCode     && { "WebMCP.otpCode":     otpCode }),
-    ...(challengeId && { "WebMCP.challengeId": challengeId }),
+    ...(otpCode               && { "WebMCP.otpCode":               otpCode }),
+    ...(deviceAuthenticationId && { "WebMCP.deviceAuthenticationId": deviceAuthenticationId }),
   };
 
   let decision;
@@ -85,17 +85,26 @@ router.post("/", async (req, res) => {
     // OTP delivery (email to sub) before we even read this response.
     // Only intercept on the *first* pass (no otpCode in the request yet).
     const statements = decision.statements ?? [];
-    const mfaAdvice = !otpCode && statements.find(
-      s => s.id === "MFA_CHALLENGE" || s.type === "MFA_CHALLENGE" || s.name === "MFA_CHALLENGE"
-    );
+    // Detect step-up: P1AZ returns DENY + an advice statement with code "deny-stepup".
+    // The statement payload is a JSON string containing deviceAuthenticationId —
+    // that ID is what P1AZ needs on the second pass to confirm MFA completion.
+    const mfaAdvice = !otpCode && statements.find(s => s.code === "deny-stepup");
 
     if (mfaAdvice) {
-      const cid = mfaAdvice.challengeId ?? mfaAdvice.value?.challengeId ?? null;
-      console.log(`[checkout] MFA challenge issued — sub: ${claims.sub}, challengeId: ${cid}`);
+      // payload is a serialised JSON string: { message, deviceAuthenticationId }
+      let devAuthId = null;
+      try {
+        const p = typeof mfaAdvice.payload === "string"
+          ? JSON.parse(mfaAdvice.payload)
+          : mfaAdvice.payload;
+        devAuthId = p?.deviceAuthenticationId ?? null;
+      } catch { /* payload not parseable — proceed without the ID */ }
+
+      console.log(`[checkout] MFA step-up — sub: ${claims.sub}, deviceAuthenticationId: ${devAuthId}`);
       return res.status(202).json({
-        challenge:   "MFA_REQUIRED",
-        challengeId: cid,
-        hint:        "An OTP has been sent to your registered email address. Enter it to complete checkout.",
+        challenge:               "MFA_REQUIRED",
+        deviceAuthenticationId:  devAuthId,
+        hint:                    "An OTP has been sent to your registered email address. Enter it to complete checkout.",
       });
     }
 

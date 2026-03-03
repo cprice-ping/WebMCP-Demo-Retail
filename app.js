@@ -593,7 +593,7 @@ registerTool(
       let verifyResponse;
       try {
         verifyResponse = await apiRequest("POST", "/checkout", {
-          body: { ...requestBody, otpCode: otpResult.otpCode, challengeId: apiResponse.challengeId },
+          body: { ...requestBody, otpCode: otpResult.otpCode, deviceAuthenticationId: apiResponse.deviceAuthenticationId },
           requiresAuth: true,
         });
       } catch (err) {
