@@ -64,7 +64,7 @@ router.post("/", async (req, res) => {
     "WebMCP.Request.orderItemCount":          String(items.length),
     // Second-pass MFA verification — present only when the user supplied an OTP
     ...(otpCode               && { "WebMCP.Request.otpCode":               otpCode }),
-    ...(deviceAuthenticationId && { "WebMCP.deviceAuthenticationId": deviceAuthenticationId }),
+    ...(deviceAuthenticationId && { "WebMCP.Request.deviceAuthenticationId": deviceAuthenticationId }),
   };
 
   let decision;
