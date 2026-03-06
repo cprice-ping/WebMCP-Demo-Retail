@@ -171,6 +171,7 @@ router.post("/", async (req, res) => {
       let verifyId = null;
       let qrUrl = null;
       let hint = "Scan the QR code to verify this transaction.";
+      let webVerificationCode = null;
       try {
         const p = typeof verifyAdvice.payload === "string"
           ? JSON.parse(verifyAdvice.payload)
@@ -178,6 +179,7 @@ router.post("/", async (req, res) => {
         verifyId = p?.verifyTransactionId ?? null;
         qrUrl = p?.qrUrl ?? null;
         hint = p?.message ?? hint;
+        webVerificationCode = p?.webVerificationCode ?? null;
       } catch {
         // payload parse failed; still signal challenge
       }
@@ -188,6 +190,7 @@ router.post("/", async (req, res) => {
         verifyTransactionId: verifyId,
         qrUrl,
         hint,
+        webVerificationCode,
       });
     }
 
