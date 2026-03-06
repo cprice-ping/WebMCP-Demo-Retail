@@ -137,64 +137,36 @@ router.post("/", async (req, res) => {
   }
 
   if (decision.decision !== "PERMIT") {
-    // ── MFA step-up: DENY on first pass + MFA_CHALLENGE advice ──
-    // P1AZ signals step-up by returning DENY with an advice statement whose
-    // id/type/name is "MFA_CHALLENGE".  The obligation in the policy fires the
-    // OTP delivery (email to sub) before we even read this response.
-    // Only intercept on the *first* pass (no otpCode in the request yet).
     const statements = decision.statements ?? [];
-    // Detect step-up: P1AZ returns DENY + an advice statement with code "deny-stepup".
-    // The statement payload is a JSON string containing deviceAuthenticationId —
-    // that ID is what P1AZ needs on the second pass to confirm MFA completion.
-    const mfaAdvice = !otpCode && statements.find(s => s.code === "deny-stepup");
 
-    if (mfaAdvice) {
-      // payload is a serialised JSON string: { message, deviceAuthenticationId }
-      let devAuthId = null;
-      try {
-        const p = typeof mfaAdvice.payload === "string"
-          ? JSON.parse(mfaAdvice.payload)
-          : mfaAdvice.payload;
-        devAuthId = p?.deviceAuthenticationId ?? null;
-      } catch { /* payload not parseable — proceed without the ID */ }
-
-      console.log(`[checkout] MFA step-up — sub: ${maskSubject(claims.sub)}, deviceAuthenticationId: ${devAuthId}`);
-      return res.status(202).json({
-        challenge:               "MFA_REQUIRED",
-        deviceAuthenticationId:  devAuthId,
-        hint:                    "An OTP has been sent to your registered email address. Enter it to complete checkout.",
+    // ── Interactive DENY: policy returned statements with payloads ──
+    // The statement `code` is the contract between the policy author and this
+    // application. The server's job here is only to:
+    //   1. Parse any JSON-string payloads into objects (they arrive serialised)
+    //   2. Forward them to the client as-is (202 so the HTTP client doesn't throw)
+    //
+    // The client owns dispatch — if a new statement code appears, add a handler
+    // there; no server change needed. This also maps cleanly to an API Gateway
+    // pattern: the gateway enforces PERMIT/DENY; the client handles step-up UX.
+    const interactive = statements
+      .filter(s => s.payload)
+      .map(s => {
+        let payload = s.payload;
+        try {
+          payload = typeof s.payload === "string" ? JSON.parse(s.payload) : s.payload;
+        } catch { /* not valid JSON — forward raw string */ }
+        return { code: s.code, name: s.name, payload };
       });
+
+    if (interactive.length > 0) {
+      console.log(
+        `[checkout] DENY with interactive statements — ` +
+        `sub: ${maskSubject(claims.sub)}, codes: ${interactive.map(s => s.code).join(", ")}`
+      );
+      return res.status(202).json({ denied: true, statements: interactive });
     }
 
-    const verifyAdvice = statements.find(s => s.code === "deny-verify");
-    if (verifyAdvice) {
-      let verifyId = null;
-      let qrUrl = null;
-      let hint = "Scan the QR code to verify this transaction.";
-      let webVerificationCode = null;
-      try {
-        const p = typeof verifyAdvice.payload === "string"
-          ? JSON.parse(verifyAdvice.payload)
-          : verifyAdvice.payload;
-        verifyId = p?.verifyTransactionId ?? null;
-        qrUrl = p?.qrUrl ?? null;
-        hint = p?.message ?? hint;
-        webVerificationCode = p?.webVerificationCode ?? null;
-      } catch {
-        // payload parse failed; still signal challenge
-      }
-
-      console.log(`[checkout] Verify step-up — sub: ${maskSubject(claims.sub)}, verifyTransactionId: ${verifyId}`);
-      return res.status(202).json({
-        challenge: "VERIFY_REQUIRED",
-        verifyTransactionId: verifyId,
-        qrUrl,
-        hint,
-        webVerificationCode,
-      });
-    }
-
-    // ── Regular DENY / INDETERMINATE ────────────────────────────
+    // ── Hard DENY: no client-actionable statements ───────────────
     const isDeny          = decision.decision === "DENY";
     const isIndeterminate = decision.decision === "INDETERMINATE";
     console.warn(`[checkout] Not permitted — sub: ${maskSubject(claims.sub)}, decision: ${decision.decision}`);
@@ -203,7 +175,6 @@ router.post("/", async (req, res) => {
               : isIndeterminate ? "No policy matched this request — checkout cannot proceed."
               :                   `Checkout not permitted (decision: ${decision.decision}).`,
       decision: decision.decision,
-      advice:   statements,
       user:     { sub: claims.sub, client_id: claims.client_id ?? claims.azp },
     });
   }

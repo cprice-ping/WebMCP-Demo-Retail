@@ -693,74 +693,79 @@ registerTool(
       throw err;
     }
 
-    // ── MFA step-up: P1AZ returned DENY + MFA_CHALLENGE advice ───────
-    // Server responds 202 (not 4xx) so apiRequest returns the body normally.
-    // We then elicit the OTP and re-POST as a verification pass.
-    if (apiResponse?.challenge === "MFA_REQUIRED") {
-      logToolEvent(
-        `[checkout] P1AZ issued MFA step-up — eliciting OTP via WebMCP Elicitation`,
-        "info"
-      );
+    // ── P1AZ interactive DENY: dispatch on statement code ─────────────
+    // Server returns 202 { denied: true, statements: [{ code, name, payload }] }
+    // when the policy wants the client to take action before retrying.
+    // The statement code is the policy-author-defined contract — add a new
+    // handler below for each code you want to support; no server change needed.
+    if (apiResponse?.denied && apiResponse.statements?.length) {
+      for (const stmt of apiResponse.statements) {
+        const p = stmt.payload ?? {};
 
-      const otpResult = await (client?.requestUserInteraction
-        ? client.requestUserInteraction(
-            () => new Promise((resolve) => showOtpModal(apiResponse.hint, resolve))
-          )
-        : new Promise((resolve) => showOtpModal(apiResponse.hint, resolve)));
+        // ── deny-stepup: MFA/OTP required ──────────────────────────
+        if (stmt.code === "deny-stepup") {
+          logToolEvent(`[checkout] P1AZ: deny-stepup — eliciting OTP via WebMCP Elicitation`, "info");
 
-      if (otpResult.cancelled) return otpResult;
+          const otpResult = await (client?.requestUserInteraction
+            ? client.requestUserInteraction(() => new Promise(resolve => showOtpModal(p.message, resolve)))
+            : new Promise(resolve => showOtpModal(p.message, resolve)));
 
-      // Re-POST with the OTP code so P1AZ can verify
-      let verifyResponse;
-      try {
-        verifyResponse = await apiRequest("POST", "/checkout", {
-          body: { ...requestBody, otpCode: otpResult.otpCode, deviceAuthenticationId: apiResponse.deviceAuthenticationId },
-          requiresAuth: true,
-        });
-      } catch (err) {
-        showOrderDenied(err.message);
-        throw err;
+          if (otpResult.cancelled) return otpResult;
+
+          let mfaResponse;
+          try {
+            mfaResponse = await apiRequest("POST", "/checkout", {
+              body: { ...requestBody, otpCode: otpResult.otpCode, deviceAuthenticationId: p.deviceAuthenticationId },
+              requiresAuth: true,
+            });
+          } catch (err) { showOrderDenied(err.message); throw err; }
+
+          showOrderSuccess(mfaResponse.order ?? userDecision.order);
+          cart = {};
+          renderCart();
+          return mfaResponse;
+        }
+
+        // ── deny-verify: PingOne Verify QR step-up ─────────────────
+        if (stmt.code === "deny-verify") {
+          logToolEvent(`[checkout] P1AZ: deny-verify — displaying QR and polling every 4s`, "info");
+
+          if (!p.verifyTransactionId || !p.qrUrl) {
+            const message = "deny-verify statement is missing verifyTransactionId or qrUrl.";
+            showOrderDenied(message);
+            throw new Error(message);
+          }
+
+          const verifyResult = await (client?.requestUserInteraction
+            ? client.requestUserInteraction(() => runVerifyChallenge({
+                hint: p.message, qrUrl: p.qrUrl,
+                webVerificationCode: p.webVerificationCode,
+                requestBody: { ...requestBody, verifyTransactionId: p.verifyTransactionId },
+              }))
+            : runVerifyChallenge({
+                hint: p.message, qrUrl: p.qrUrl,
+                webVerificationCode: p.webVerificationCode,
+                requestBody: { ...requestBody, verifyTransactionId: p.verifyTransactionId },
+              }));
+
+          if (verifyResult.cancelled) return verifyResult;
+          if (verifyResult.error) { showOrderDenied(verifyResult.error); throw new Error(verifyResult.error); }
+
+          showOrderSuccess(verifyResult.order ?? userDecision.order);
+          cart = {};
+          renderCart();
+          return verifyResult;
+        }
+
+        // ── unhandled code: log and fall through ───────────────────
+        logToolEvent(`[checkout] P1AZ: unhandled statement code "${stmt.code}" — no handler registered`, "warn");
       }
 
-      showOrderSuccess(verifyResponse.order ?? userDecision.order);
-      cart = {};
-      renderCart();
-      return verifyResponse;
-    }
-
-    if (apiResponse?.challenge === "VERIFY_REQUIRED") {
-      logToolEvent(
-        `[checkout] P1AZ issued verify challenge — displaying QR and polling every 4s`,
-        "info"
-      );
-
-      if (!apiResponse.verifyTransactionId || !apiResponse.qrUrl) {
-        const message = "Verify challenge is missing verifyTransactionId or qrUrl.";
-        showOrderDenied(message);
-        throw new Error(message);
-      }
-
-      const verifyResult = await (client?.requestUserInteraction
-        ? client.requestUserInteraction(() => runVerifyChallenge({
-            hint:                apiResponse.hint,
-            qrUrl:               apiResponse.qrUrl,
-            webVerificationCode: apiResponse.webVerificationCode,
-            requestBody:         { ...requestBody, verifyTransactionId: apiResponse.verifyTransactionId },
-          }))
-        : runVerifyChallenge({
-            hint:                apiResponse.hint,
-            qrUrl:               apiResponse.qrUrl,
-            webVerificationCode: apiResponse.webVerificationCode,
-            requestBody:         { ...requestBody, verifyTransactionId: apiResponse.verifyTransactionId },
-          }));
-
-      if (verifyResult.cancelled) return verifyResult;
-      if (verifyResult.error) { showOrderDenied(verifyResult.error); throw new Error(verifyResult.error); }
-
-      showOrderSuccess(verifyResult.order ?? userDecision.order);
-      cart = {};
-      renderCart();
-      return verifyResult;
+      // All statements were unrecognised
+      const codes = apiResponse.statements.map(s => s.code).join(", ");
+      const message = `Checkout denied — unhandled statement code(s): ${codes}`;
+      showOrderDenied(message);
+      throw new Error(message);
     }
 
     // apiResponse is null when no real backend is present (demo mode)
