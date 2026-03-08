@@ -16,6 +16,70 @@ const PRODUCTS = [];
 // ------------------------------------------------------------
 let cart = {}; // { productId: quantity }
 
+// ============================================================
+// PingOne Protect (Signals) SDK
+// SDK is loaded from CDN via a <script defer> tag in index.html.
+// initProtectSDK() — called once from mountApp(); fires-and-forgets.
+// getProtectSignals() — called at checkout tool invocation; returns
+//   the payload string for P1AZ, or null on failure/timeout.
+// ============================================================
+
+let protectSdkReady  = false;
+let protectSdkFailed = false;
+
+function initProtectSDK() {
+  const doInit = () => {
+    if (!window._pingOneSignals) {
+      protectSdkFailed = true;
+      logToolEvent("[protect] _pingOneSignals not on window after ready event", "warn");
+      return;
+    }
+    window._pingOneSignals.init({
+      behavioralDataCollection:      true,
+      universalDeviceIdentification: true,
+    }).then(() => {
+      protectSdkReady = true;
+      logToolEvent("[protect] PingOne Protect SDK initialized — signals active", "info");
+    }).catch(err => {
+      protectSdkFailed = true;
+      logToolEvent(`[protect] SDK init() failed: ${err?.message ?? err}`, "warn");
+    });
+  };
+
+  // The SDK sets window._pingOneSignalsReady = true and dispatches
+  // PingOneSignalsReadyEvent when it is ready to be initialised.
+  if (window._pingOneSignalsReady) {
+    doInit();
+  } else {
+    document.addEventListener("PingOneSignalsReadyEvent", doInit, { once: true });
+  }
+}
+
+async function getProtectSignals(timeoutMs = 5000) {
+  if (!protectSdkReady) {
+    logToolEvent(
+      protectSdkFailed
+        ? "[protect] SDK failed to init — checkout will proceed without signals"
+        : "[protect] SDK not yet ready — checkout will proceed without signals",
+      "warn"
+    );
+    return null;
+  }
+  try {
+    const payload = await Promise.race([
+      window._pingOneSignals.getData(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("getData() timed out")), timeoutMs)
+      ),
+    ]);
+    logToolEvent(`[protect] getData() returned ${payload?.length ?? 0}-char signals payload`, "info");
+    return payload ?? null;
+  } catch (err) {
+    logToolEvent(`[protect] getData() error: ${err?.message ?? err} — proceeding without signals`, "warn");
+    return null;
+  }
+}
+
 // ------------------------------------------------------------
 // Verify modal helpers
 // openVerifyModal: shows the modal and returns a view-handle.
@@ -664,6 +728,11 @@ registerTool(
       return { error: "Cart is empty. Add items before checkout." };
     }
 
+    // Kick off Protect signals collection immediately — runs in parallel
+    // with the confirmation modal so getData() is ready (or timed out)
+    // by the time the user clicks Confirm. No await yet.
+    const signalsPromise = getProtectSignals();
+
     // Elicitation: surface confirmation modal via client.requestUserInteraction
     // This is the spec-defined channel for a tool to pause and await human input.
     // client is a ModelContextClient (native) or mockClient (UI calls).
@@ -673,11 +742,15 @@ registerTool(
 
     if (userDecision.cancelled) return userDecision;
 
+    // Await signals — should already be resolved since the modal gave it time.
+    const signalsPayload = await signalsPromise;
+
     // User confirmed — now POST to the protected API with the Bearer token
     const requestBody = {
       order_id: userDecision.order.order_id,
       items: userDecision.order.items,
       total: userDecision.order.total,
+      ...(signalsPayload && { signalsPayload }),
     };
 
     let apiResponse;
@@ -1361,6 +1434,10 @@ async function mountApp() {
 
   logToolEvent(`Session established for ${name}`);
   logToolEvent(`client_id: ${CONFIG.PINGONE_CLIENT_ID} — agent identity signal present in token`);
+
+  // Initialise PingOne Protect — non-blocking; fires and forgets.
+  // SDK will be ready well before the first checkout is triggered.
+  initProtectSDK();
 }
 
 // ============================================================

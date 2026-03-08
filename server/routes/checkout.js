@@ -20,7 +20,7 @@ function maskSubject(sub) {
 }
 
 function normalizeCheckoutRequest(body = {}) {
-  const { items, total, otpCode, deviceAuthenticationId, verifyTransactionId } = body ?? {};
+  const { items, total, otpCode, deviceAuthenticationId, verifyTransactionId, signalsPayload } = body ?? {};
 
   if (!Array.isArray(items) || items.length === 0 || items.length > 100) {
     return { error: "Cart is empty or items is invalid (1-100 items required)." };
@@ -60,12 +60,20 @@ function normalizeCheckoutRequest(body = {}) {
     return { error: "verifyTransactionId is too long." };
   }
 
+  // signalsPayload is the PingOne Protect getData() string — can be large.
+  // Truncate rather than reject so a slightly oversized payload doesn't
+  // block checkout; P1AZ will still evaluate with whatever it receives.
+  const cleanSignals = signalsPayload == null
+    ? undefined
+    : String(signalsPayload).slice(0, 100_000);
+
   return {
     items: normalizedItems,
     total: finalTotal,
     otpCode: cleanOtp,
     deviceAuthenticationId: cleanDeviceAuthId,
     verifyTransactionId: cleanVerifyTxId,
+    signalsPayload: cleanSignals,
   };
 }
 
@@ -105,7 +113,7 @@ router.post("/", async (req, res) => {
   if (normalized.error) {
     return res.status(400).json({ error: normalized.error });
   }
-  const { items, total, otpCode, deviceAuthenticationId, verifyTransactionId } = normalized;
+  const { items, total, otpCode, deviceAuthenticationId, verifyTransactionId, signalsPayload } = normalized;
 
   // ── 4. PingOne Authorize decision ───────────────────────────
   // `userContext` carries user identity (handled by requestDecision via claims.sub).
@@ -123,6 +131,7 @@ router.post("/", async (req, res) => {
     ...(otpCode               && { "WebMCP.Request.otpCode":               otpCode }),
     ...(deviceAuthenticationId && { "WebMCP.Request.deviceAuthenticationId": deviceAuthenticationId }),
     ...(verifyTransactionId    && { "WebMCP.Request.verifyTransactionId":    verifyTransactionId }),
+    ...(signalsPayload         && { "WebMCP.Request.signalsPayload":         signalsPayload }),
   };
 
   let decision;
