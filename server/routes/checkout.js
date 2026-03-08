@@ -125,10 +125,10 @@ router.post("/", async (req, res) => {
   // camelCase is used within the WebMCP. namespace instead.
   //
   // PingOne Protect context lives under WebMCP.Request.Protect.:
-  //   userId        — sub claim; P1AZ can correlate with Protect risk events
   //   ipAddress     — client IP from X-Forwarded-For or req.ip
   //   userAgent     — browser User-Agent
   //   signalsPayload — getData() string from the Protect SDK
+  // Note: userId is redundant here — userContext.user.id already carries the sub claim.
   const clientIp = (req.headers["x-forwarded-for"] ?? "").split(",")[0].trim()
                 || req.ip
                 || "";
@@ -139,7 +139,6 @@ router.post("/", async (req, res) => {
     "WebMCP.Request.orderTotal":                  String(total ?? 0),
     "WebMCP.Request.orderItemCount":              String(items.length),
     // PingOne Protect context
-    "WebMCP.Request.Protect.userId":              claims.sub,
     "WebMCP.Request.Protect.ipAddress":           clientIp,
     "WebMCP.Request.Protect.userAgent":           userAgent,
     ...(signalsPayload && { "WebMCP.Request.Protect.signalsPayload": signalsPayload }),
