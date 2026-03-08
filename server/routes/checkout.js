@@ -123,15 +123,30 @@ router.post("/", async (req, res) => {
   // namespace folder for this demo, keeping it separate from other policies.
   // Dots within names are avoided (P1AZ treats them as sub-folder paths);
   // camelCase is used within the WebMCP. namespace instead.
+  //
+  // PingOne Protect context lives under WebMCP.Request.Protect.:
+  //   userId        — sub claim; P1AZ can correlate with Protect risk events
+  //   ipAddress     — client IP from X-Forwarded-For or req.ip
+  //   userAgent     — browser User-Agent
+  //   signalsPayload — getData() string from the Protect SDK
+  const clientIp = (req.headers["x-forwarded-for"] ?? "").split(",")[0].trim()
+                || req.ip
+                || "";
+  const userAgent = req.headers["user-agent"] ?? "";
+
   const azParameters = {
     ...agentIdentityParameters(claims),   // WebMCP.Request.clientId, WebMCP.Request.scope
-    "WebMCP.Request.orderTotal":              String(total ?? 0),
-    "WebMCP.Request.orderItemCount":          String(items.length),
+    "WebMCP.Request.orderTotal":                  String(total ?? 0),
+    "WebMCP.Request.orderItemCount":              String(items.length),
+    // PingOne Protect context
+    "WebMCP.Request.Protect.userId":              claims.sub,
+    "WebMCP.Request.Protect.ipAddress":           clientIp,
+    "WebMCP.Request.Protect.userAgent":           userAgent,
+    ...(signalsPayload && { "WebMCP.Request.Protect.signalsPayload": signalsPayload }),
     // Second-pass MFA verification — present only when the user supplied an OTP
     ...(otpCode               && { "WebMCP.Request.otpCode":               otpCode }),
     ...(deviceAuthenticationId && { "WebMCP.Request.deviceAuthenticationId": deviceAuthenticationId }),
     ...(verifyTransactionId    && { "WebMCP.Request.verifyTransactionId":    verifyTransactionId }),
-    ...(signalsPayload         && { "WebMCP.Request.signalsPayload":         signalsPayload }),
   };
 
   let decision;

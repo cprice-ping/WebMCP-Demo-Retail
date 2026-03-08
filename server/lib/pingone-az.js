@@ -185,7 +185,7 @@ export async function requestDecision(userClaims, parameters = {}) {
   console.log(`[AZ] Decision request — user: ${maskSubject(userClaims.sub)}`);
   // Log parameters individually — signals payload is large so show length only.
   for (const [k, v] of Object.entries(parameters)) {
-    const display = k === "WebMCP.Request.signalsPayload"
+    const display = k === "WebMCP.Request.Protect.signalsPayload"
       ? `<${String(v).length} chars>`
       : v;
     console.log(`[AZ]   ${k}: ${display}`);
