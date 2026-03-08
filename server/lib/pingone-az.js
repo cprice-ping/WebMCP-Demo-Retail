@@ -183,8 +183,13 @@ export async function requestDecision(userClaims, parameters = {}) {
   };
 
   console.log(`[AZ] Decision request — user: ${maskSubject(userClaims.sub)}`);
-  console.log(`[AZ] Body: ${JSON.stringify(body)}`);
-
+  // Log parameters individually — signals payload is large so show length only.
+  for (const [k, v] of Object.entries(parameters)) {
+    const display = k === "WebMCP.Request.signalsPayload"
+      ? `<${String(v).length} chars>`
+      : v;
+    console.log(`[AZ]   ${k}: ${display}`);
+  }
 
   const resp = await fetch(
     `${P1_API}/environments/${envId}/decisionEndpoints/${endpointId}`,
