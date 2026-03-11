@@ -601,7 +601,7 @@ registerTool(
   {
     description: "Fetches the product catalog from the backend API. Requires an active user session.",
     parameters: {},
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: "true" },
     ui: {
       labels: [{text:"GET"}, {text:"API", cls:"tool-label-api"}],
       desc: "GET <code>/api/products.json</code> — fetches catalog from the backend.",
@@ -663,7 +663,7 @@ registerTool(
   {
     description: "Returns the current cart contents and total as JSON. Requires an active user session.",
     parameters: {},
-    annotations: { readOnlyHint: true },
+    annotations: { readOnlyHint: "true" },
     ui: {
       labels: [{text:"GET"}],
       desc: "Returns current cart items, item count, and total as JSON.",
