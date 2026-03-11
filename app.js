@@ -331,6 +331,9 @@ function ensureModelContextShim() {
       async registerTool(name, descriptor, handler) {
         toolRegistry[name] = { descriptor, handler };
       },
+      unregisterTool(name) {
+        delete toolRegistry[name];
+      },
       listTools() {
         return Object.entries(toolRegistry).map(([name, value]) => ({
           name,
@@ -434,6 +437,14 @@ function registerTool(name, descriptor, handler) {
   }
 
   registerToolsWithNativeModelContext();
+}
+
+function unregisterTool(name) {
+  delete toolRegistry[name];
+  nativeRegisteredTools.delete(name);
+  if (navigator.modelContext && !navigator.modelContext.__shopMcpShim) {
+    try { navigator.modelContext.unregisterTool?.(name); } catch (_) { /* ignore */ }
+  }
 }
 
 // ============================================================
@@ -709,18 +720,17 @@ registerTool(
   }
 );
 
-// Tool: checkout
-registerTool(
-  "checkout",
-  {
+// Tool: checkout — registered dynamically via syncCheckoutTool() when cart has items
+const CHECKOUT_DESCRIPTOR = {
     description: "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. Requires an active user session and user confirmation via elicitation before the request is sent. Returns an error if the user is not signed in or the cart is empty.",
     parameters: {},
     ui: {
       labels: [{text:"ELICIT", cls:"tool-label-confirm"}, {text:"API", cls:"tool-label-api"}, {text:"BEARER", cls:"tool-label-auth"}],
       desc: "POST <code>/api/checkout</code> — elicits confirmation, then calls the API with <code>Authorization: Bearer &lt;access_token&gt;</code>.",
     },
-  },
-  async (args, client) => {
+};
+
+async function checkoutHandler(args, client) {
     const sessionError = requireSession();
     if (sessionError) return sessionError;
 
@@ -854,26 +864,18 @@ registerTool(
     renderCart();
 
     return finalResult;
-  }
-);
+}
 
 // ============================================================
 // Cart helpers
 // ============================================================
 
-// Update the tool count badge and generate tool cards from the registry.
-// This is the single source of truth — adding/removing a registerTool() call
-// automatically updates both the badge and the UI card list.
-document.addEventListener("DOMContentLoaded", () => {
-  // Badge
+// Render tool cards and update the badge from the live toolRegistry.
+// Called on DOMContentLoaded and again by syncCheckoutTool() when cart state changes.
+function renderToolCards() {
   const badge = document.getElementById("tool-count-badge");
   if (badge) badge.textContent = `${Object.keys(toolRegistry).length} tools registered`;
 
-  // Login footnote scope — driven from CONFIG, not hardcoded
-  const footnote = document.getElementById("login-scope");
-  if (footnote) footnote.textContent = CONFIG.PINGONE_SCOPES;
-
-  // Tool cards
   const list = document.getElementById("tool-list");
   if (!list) return;
 
@@ -898,6 +900,38 @@ document.addEventListener("DOMContentLoaded", () => {
         <button class="btn-tool" data-tool="${name}">Call tool</button>
       </div>`;
   }).join("");
+
+  // Re-populate the product select if the catalog is already loaded
+  const sel = document.getElementById("tool-product-id");
+  if (sel && PRODUCTS.length > 0) {
+    sel.innerHTML = PRODUCTS.map(p =>
+      `<option value="${p.id}">${p.name} ($${p.price.toFixed(2)})</option>`
+    ).join("");
+  }
+}
+
+// Register or unregister the checkout tool based on whether the cart has items.
+// Called from renderCart() so the tool list always reflects current cart state.
+function syncCheckoutTool() {
+  const hasItems = Object.keys(cart).length > 0;
+  const isRegistered = "checkout" in toolRegistry;
+  if (hasItems && !isRegistered) {
+    registerTool("checkout", CHECKOUT_DESCRIPTOR, checkoutHandler);
+    logToolEvent("[tools] checkout registered — cart is non-empty");
+    renderToolCards();
+  } else if (!hasItems && isRegistered) {
+    unregisterTool("checkout");
+    logToolEvent("[tools] checkout unregistered — cart is empty");
+    renderToolCards();
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  renderToolCards();
+
+  // Login footnote scope — driven from CONFIG, not hardcoded
+  const footnote = document.getElementById("login-scope");
+  if (footnote) footnote.textContent = CONFIG.PINGONE_SCOPES;
 });
 
 function cartSummary() {
@@ -924,6 +958,7 @@ function renderCart() {
   if (summary.items.length === 0) {
     list.innerHTML = '<p class="cart-empty">Your cart is empty.</p>';
     footer.classList.add("hidden");
+    syncCheckoutTool();
     return;
   }
 
@@ -946,6 +981,8 @@ function renderCart() {
       invokeTool("remove_from_cart", { product_id: btn.dataset.id });
     });
   });
+
+  syncCheckoutTool();
 }
 
 // ============================================================
