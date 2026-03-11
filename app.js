@@ -690,37 +690,35 @@ registerTool(
   }
 );
 
-// Tool: remove_from_cart
-registerTool(
-  "remove_from_cart",
-  {
-    description: "Removes a product entirely from the cart by product ID.",
-    parameters: {
-      type: "object",
-      properties: {
-        product_id: { type: "string", description: "Product ID to remove" },
-      },
-      required: ["product_id"],
+// Tool: remove_from_cart — registered dynamically via syncCartTools() when cart has items
+const REMOVE_FROM_CART_DESCRIPTOR = {
+  description: "Removes a product entirely from the cart by product ID.",
+  parameters: {
+    type: "object",
+    properties: {
+      product_id: { type: "string", description: "Product ID to remove" },
     },
-    ui: {
-      labels: [{text:"MUTATE", cls:"tool-label-mutate"}],
-      desc: "Removes a product from the cart by product ID.",
-    },
+    required: ["product_id"],
   },
-  async ({ product_id }) => {
-    const sessionError = requireSession();
-    if (sessionError) return sessionError;
-    if (!cart[product_id]) {
-      return { error: `Product "${product_id}" is not in the cart.` };
-    }
-    const removed = { product_id, name: PRODUCTS.find(p => p.id === product_id)?.name };
-    delete cart[product_id];
-    renderCart();
-    return { success: true, removed, cart_summary: cartSummary() };
-  }
-);
+  ui: {
+    labels: [{text:"MUTATE", cls:"tool-label-mutate"}],
+    desc: "Removes a product from the cart by product ID.",
+  },
+};
 
-// Tool: checkout — registered dynamically via syncCheckoutTool() when cart has items
+async function removeFromCartHandler({ product_id }) {
+  const sessionError = requireSession();
+  if (sessionError) return sessionError;
+  if (!cart[product_id]) {
+    return { error: `Product "${product_id}" is not in the cart.` };
+  }
+  const removed = { product_id, name: PRODUCTS.find(p => p.id === product_id)?.name };
+  delete cart[product_id];
+  renderCart();
+  return { success: true, removed, cart_summary: cartSummary() };
+}
+
+// Tool: checkout — registered dynamically via syncCartTools() when cart has items
 const CHECKOUT_DESCRIPTOR = {
     description: "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. Requires an active user session and user confirmation via elicitation before the request is sent. Returns an error if the user is not signed in or the cart is empty.",
     parameters: {},
@@ -910,20 +908,30 @@ function renderToolCards() {
   }
 }
 
-// Register or unregister the checkout tool based on whether the cart has items.
-// Called from renderCart() so the tool list always reflects current cart state.
-function syncCheckoutTool() {
+// Register or unregister cart-dependent tools based on whether the cart has items.
+// remove_from_cart and checkout only make sense when there's something in the cart.
+// Called from renderCart() so the tool list always reflects current page state.
+function syncCartTools() {
   const hasItems = Object.keys(cart).length > 0;
-  const isRegistered = "checkout" in toolRegistry;
-  if (hasItems && !isRegistered) {
-    registerTool("checkout", CHECKOUT_DESCRIPTOR, checkoutHandler);
-    logToolEvent("[tools] checkout registered — cart is non-empty");
-    renderToolCards();
-  } else if (!hasItems && isRegistered) {
-    unregisterTool("checkout");
-    logToolEvent("[tools] checkout unregistered — cart is empty");
-    renderToolCards();
+  let changed = false;
+
+  for (const [name, descriptor, handler] of [
+    ["remove_from_cart", REMOVE_FROM_CART_DESCRIPTOR, removeFromCartHandler],
+    ["checkout",         CHECKOUT_DESCRIPTOR,         checkoutHandler],
+  ]) {
+    const isRegistered = name in toolRegistry;
+    if (hasItems && !isRegistered) {
+      registerTool(name, descriptor, handler);
+      logToolEvent(`[tools] ${name} registered — cart is non-empty`);
+      changed = true;
+    } else if (!hasItems && isRegistered) {
+      unregisterTool(name);
+      logToolEvent(`[tools] ${name} unregistered — cart is empty`);
+      changed = true;
+    }
   }
+
+  if (changed) renderToolCards();
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -958,7 +966,7 @@ function renderCart() {
   if (summary.items.length === 0) {
     list.innerHTML = '<p class="cart-empty">Your cart is empty.</p>';
     footer.classList.add("hidden");
-    syncCheckoutTool();
+    syncCartTools();
     return;
   }
 
@@ -982,7 +990,7 @@ function renderCart() {
     });
   });
 
-  syncCheckoutTool();
+  syncCartTools();
 }
 
 // ============================================================
