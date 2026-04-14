@@ -20,6 +20,18 @@ const CONFIG = {
   // OIDC scopes to request
   PINGONE_SCOPES: "openid profile email",
 
+  // AG-UI Custom Agent WebSocket endpoint.
+  // Set to a wss:// URL to enable the Custom Agent panel and auto-connect on sign-in.
+  // Leave empty to hide the agent panel (BCA-only demo mode).
+  // ?agentUrl= query param overrides (persisted in sessionStorage).
+  AGUI_AGENT_URL: (() => {
+    const param = new URLSearchParams(window.location.search).get("agentUrl");
+    if (param) { sessionStorage.setItem("agentUrl", param); return param; }
+    const stored = sessionStorage.getItem("agentUrl");
+    if (stored) return stored;
+    return "";
+  })(),
+
   // Backend API base URL.
   // ?apiBase= query param overrides (persisted in sessionStorage so it survives
   // the OIDC redirect) — useful for pointing a deployed frontend at a local server:

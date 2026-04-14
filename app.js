@@ -5,6 +5,10 @@
 
 "use strict";
 
+// Stable identifier for this site — sent to the Custom Agent on WS connect.
+// The agent namespaces tools as "accessories.view_products" etc.
+const SITE_LABEL = "accessories";
+
 // ------------------------------------------------------------
 // Product catalog — populated from api/products.json via view_products tool.
 // Do not add products here; api/products.json is the source of truth.
@@ -931,7 +935,10 @@ function syncCartTools() {
     }
   }
 
-  if (changed) renderToolCards();
+  if (changed) {
+    renderToolCards();
+    if (typeof notifyToolsUpdate === "function") notifyToolsUpdate();
+  }
 }
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -940,6 +947,41 @@ document.addEventListener("DOMContentLoaded", () => {
   // Login footnote scope — driven from CONFIG, not hardcoded
   const footnote = document.getElementById("login-scope");
   if (footnote) footnote.textContent = CONFIG.PINGONE_SCOPES;
+
+  // ── Agent panel wiring ──────────────────────────────────────
+  document.getElementById("btn-agent-connect")?.addEventListener("click", () => {
+    const state = (typeof getAgentConnectionState === "function")
+      ? getAgentConnectionState()
+      : "disconnected";
+    if (state === "connected") {
+      if (typeof disconnectAgent === "function") disconnectAgent();
+    } else {
+      const urlInput = document.getElementById("agent-url-input");
+      const url = urlInput?.value.trim();
+      if (!url) return;
+      connectToAgent(url, SITE_LABEL, buildToolManifest, invokeToolForAgent, onAgentTextMessage);
+    }
+  });
+
+  document.getElementById("btn-agent-send")?.addEventListener("click", () => {
+    const input = document.getElementById("agent-chat-input");
+    if (!input) return;
+    const text = input.value.trim();
+    if (!text) return;
+    sendUserMessage(text);
+    input.value = "";
+  });
+
+  document.getElementById("agent-chat-input")?.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      const input = e.target;
+      const text = input.value.trim();
+      if (!text) return;
+      sendUserMessage(text);
+      input.value = "";
+    }
+  });
 });
 
 function cartSummary() {
@@ -1104,11 +1146,14 @@ document.addEventListener("click", (e) => {
 // Tool console (simulate agent calls from UI)
 // ============================================================
 
-function logToolEvent(message, level = "info") {
+const _SRC_CLASS = { "ui": "ui", "custom-agent": "agent", "navigator.modelContext": "mc" };
+
+function logToolEvent(message, level = "info", source = null) {
   const log = document.getElementById("tool-log");
   if (!log) return;
   const entry = document.createElement("div");
-  entry.className = `log-entry log-${level}`;
+  const srcClass = source ? ` log-source-${_SRC_CLASS[source] ?? source}` : "";
+  entry.className = `log-entry log-${level}${srcClass}`;
   entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
   log.appendChild(entry);
   log.scrollTop = log.scrollHeight;
@@ -1155,9 +1200,10 @@ function sanitizeRequestForLog(rawRequest) {
 // can distinguish the two call paths for logging.
 function normalizeToolInvocation(rawRequest) {
   const request = rawRequest ?? {};
-  const isUiCall = request?.__shopMcpMeta?.source === "ui";
-  const source = isUiCall ? "ui" : "navigator.modelContext";
-  const args = isUiCall ? (request.arguments ?? {}) : request;
+  const metaSource = request?.__shopMcpMeta?.source;
+  const isWrapped = metaSource === "ui" || metaSource === "custom-agent";
+  const source = isWrapped ? metaSource : "navigator.modelContext";
+  const args = isWrapped ? (request.arguments ?? {}) : request;
   const requestForLog = sanitizeRequestForLog(request);
   return { source, args, requestForLog };
 }
@@ -1172,13 +1218,13 @@ function createInstrumentedToolHandler(name, handler) {
 
     logToolEvent(
       `→ [${source}] ${name} request: ${stringifyForLog(requestForLog)}`,
-      "call"
+      "call", source
     );
 
     if (requestForLog !== args) {
       logToolEvent(
         `→ [${source}] ${name} args: ${stringifyForLog(args)}`,
-        "call"
+        "call", source
       );
     }
 
@@ -1186,13 +1232,13 @@ function createInstrumentedToolHandler(name, handler) {
       const result = await handler(args, client);
       logToolEvent(
         `← [${source}] ${name} response (${Date.now() - started}ms): ${stringifyForLog(result)}`,
-        "result"
+        "result", source
       );
       // Spec-compliant return: { content: [{ type: "text", text: "..." }] }
       return { content: [{ type: "text", text: JSON.stringify(result) }] };
     } catch (err) {
       const message = err?.message || String(err);
-      logToolEvent(`← [${source}] ${name} error: ${message}`, "error");
+      logToolEvent(`← [${source}] ${name} error: ${message}`, "error", source);
       // Return errors as structured content rather than throwing.
       // An agent can read and reason about { error } in content;
       // a raw exception gives it nothing useful to work with.
@@ -1483,6 +1529,115 @@ async function mountApp() {
   // Initialise PingOne Protect — non-blocking; fires and forgets.
   // SDK will be ready well before the first checkout is triggered.
   initProtectSDK();
+
+  // ── AG-UI Custom Agent ──────────────────────────────────────
+  // Show/hide the agent panel based on whether a URL is configured.
+  const agentPanel = document.getElementById("agent-panel");
+  if (agentPanel) {
+    if (CONFIG.AGUI_AGENT_URL) {
+      agentPanel.classList.remove("hidden");
+      // Pre-fill the URL input with the configured value
+      const urlInput = document.getElementById("agent-url-input");
+      if (urlInput) urlInput.value = CONFIG.AGUI_AGENT_URL;
+      // Auto-connect
+      connectToAgent(
+        CONFIG.AGUI_AGENT_URL,
+        SITE_LABEL,
+        buildToolManifest,
+        invokeToolForAgent,
+        onAgentTextMessage
+      );
+    } else {
+      agentPanel.classList.add("hidden");
+    }
+  }
+}
+
+// ============================================================
+// AG-UI Custom Agent bridge
+// ============================================================
+
+/**
+ * Returns the current toolRegistry as an array of AG-UI tool definitions.
+ * Sent to the agent on SITE_CONNECT and on every TOOLS_UPDATE.
+ */
+function buildToolManifest() {
+  return Object.entries(toolRegistry).map(([name, value]) => ({
+    name,
+    description: value.descriptor?.description || "",
+    parameters:  value.descriptor?.parameters  || { type: "object", properties: {} },
+  }));
+}
+
+/**
+ * Invoke a tool on behalf of the Custom Agent.
+ * Called by ag-ui-client.js TOOL_CALL handler.
+ * Returns the plain-text content string to send back as TOOL_RESULT.
+ */
+async function invokeToolForAgent(toolCallId, name, argsString) {
+  const tool = toolRegistry[name];
+  if (!tool) return JSON.stringify({ error: `Unknown tool: ${name}` });
+
+  const mockClient = { requestUserInteraction: async (cb) => cb() };
+
+  let args;
+  try { args = JSON.parse(argsString); } catch { args = {}; }
+
+  const result = await tool.handler(
+    { __shopMcpMeta: { source: "custom-agent" }, arguments: args },
+    mockClient
+  );
+
+  // result is { content: [{ type: "text", text: "..." }] }
+  return result?.content?.[0]?.text ?? JSON.stringify(result);
+}
+
+/**
+ * Receive streaming text from the agent and render it in the chat thread.
+ * Called by ag-ui-client.js TEXT_MESSAGE / TEXT_MESSAGE_END handlers.
+ */
+function onAgentTextMessage(delta, messageId, done) {
+  const thread = document.getElementById("agent-message-thread");
+  if (!thread) return;
+
+  // Remove the empty-state placeholder on first message
+  thread.querySelector(".agent-thread-empty")?.remove();
+
+  let bubble = thread.querySelector(`[data-msg-id="${CSS.escape(messageId)}"]`);
+  if (!bubble) {
+    bubble = document.createElement("div");
+    bubble.className    = "agent-bubble agent-msg-assistant";
+    bubble.dataset.msgId = messageId;
+    thread.appendChild(bubble);
+  }
+
+  if (delta) bubble.textContent += delta;
+  if (done)  bubble.classList.add("agent-msg-done");
+
+  thread.scrollTop = thread.scrollHeight;
+}
+
+/**
+ * Send a user message to the connected Custom Agent.
+ * Renders the bubble immediately so the UI is responsive.
+ */
+function sendUserMessage(text) {
+  const trimmed = text.trim();
+  if (!trimmed) return;
+
+  const thread = document.getElementById("agent-message-thread");
+  if (thread) {
+    thread.querySelector(".agent-thread-empty")?.remove();
+    const bubble = document.createElement("div");
+    bubble.className = "agent-bubble agent-msg-user";
+    bubble.textContent = trimmed;
+    thread.appendChild(bubble);
+    thread.scrollTop = thread.scrollHeight;
+  }
+
+  if (typeof sendToAgent === "function") {
+    sendToAgent({ type: "USER_MESSAGE", message: trimmed });
+  }
 }
 
 // ============================================================

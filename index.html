@@ -205,6 +205,34 @@
           </div>
         </section>
 
+        <!-- Custom Agent panel -->
+        <section class="panel panel-agent hidden" id="agent-panel">
+          <div class="panel-header">
+            <span class="panel-icon">🤖</span>
+            <h3>Custom Agent</h3>
+            <span id="agent-status-badge" class="agent-status agent-status-disconnected">○ Disconnected</span>
+          </div>
+          <p class="panel-desc">
+            AG-UI WebSocket bridge — an external custom agent drives tools across
+            multiple site tabs. Tools execute in this tab using the active session.
+          </p>
+          <div class="agent-connect-row">
+            <input id="agent-url-input" type="text"
+                   placeholder="wss://agent.example.com/ws"
+                   class="agent-url-input" />
+            <button id="btn-agent-connect" class="btn-ghost btn-sm">Connect</button>
+          </div>
+          <div id="agent-message-thread" class="agent-message-thread">
+            <div class="agent-thread-empty">No messages yet. Connect an agent to begin.</div>
+          </div>
+          <div class="agent-chat-row">
+            <input id="agent-chat-input" type="text"
+                   placeholder="Send a message to the agent…"
+                   class="agent-chat-input" />
+            <button id="btn-agent-send" class="btn-primary btn-sm">Send</button>
+          </div>
+        </section>
+
         <!-- Token inspector -->
         <section class="panel panel-token">
           <div class="panel-header">
@@ -287,6 +315,7 @@
   ============================================================ -->
   <script src="https://apps.pingone.com/signals/web-sdk/5.6.0/signals-sdk.js" defer></script>
   <script src="config.js"></script>
+  <script src="ag-ui-client.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -969,6 +969,135 @@ code, .mono {
 ::-webkit-scrollbar-thumb:hover { background: #b0b8c8; }
 
 /* ------------------------------------------------------------
+   Tool log — source-origin colour tinting
+   Applied as a secondary class alongside log-call / log-result.
+------------------------------------------------------------ */
+
+/* Custom Agent calls are highlighted in purple */
+.log-source-agent  { border-left: 2px solid #a78bfa; padding-left: .4rem; }
+/* navigator.modelContext calls are tinted blue */
+.log-source-mc     { border-left: 2px solid #60a5fa; padding-left: .4rem; }
+/* UI-triggered calls are unstyled (default) */
+
+/* ------------------------------------------------------------
+   Custom Agent panel
+------------------------------------------------------------ */
+
+.panel-agent { /* inherits .panel base styles */ }
+
+/* Status badge */
+.agent-status {
+  font-size: .7rem;
+  font-weight: 700;
+  letter-spacing: .04em;
+  padding: 2px 7px;
+  border-radius: 20px;
+  white-space: nowrap;
+}
+
+.agent-status-connected    { background: #dcfce7; color: #15803d; }
+.agent-status-connecting   { background: #fef9c3; color: #92400e; }
+.agent-status-disconnected { background: var(--ping-gray); color: var(--ping-muted); border: 1px solid var(--ping-border); }
+
+/* Connect-row: URL input + button on one line */
+.agent-connect-row {
+  display: flex;
+  gap: .4rem;
+  margin-bottom: .6rem;
+}
+
+.agent-url-input {
+  flex: 1;
+  min-width: 0;
+  padding: .35rem .5rem;
+  font-size: .78rem;
+  font-family: var(--mono);
+  border: 1px solid var(--ping-border);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--ping-text);
+}
+
+.agent-url-input:focus {
+  outline: 2px solid var(--ping-blue);
+  outline-offset: -1px;
+}
+
+/* Message thread */
+.agent-message-thread {
+  min-height: 120px;
+  max-height: 240px;
+  overflow-y: auto;
+  border: 1px solid var(--ping-border);
+  border-radius: var(--radius);
+  background: #fff;
+  padding: .5rem;
+  display: flex;
+  flex-direction: column;
+  gap: .4rem;
+  margin-bottom: .5rem;
+}
+
+.agent-thread-empty {
+  font-size: .78rem;
+  color: var(--ping-muted);
+  text-align: center;
+  padding: 1.5rem 0;
+  flex: 1;
+}
+
+/* Chat bubbles */
+.agent-bubble {
+  font-size: .8rem;
+  line-height: 1.4;
+  padding: .4rem .6rem;
+  border-radius: var(--radius);
+  max-width: 90%;
+  word-break: break-word;
+}
+
+.agent-msg-user {
+  align-self: flex-end;
+  background: var(--ping-blue);
+  color: #fff;
+  border-bottom-right-radius: 3px;
+}
+
+.agent-msg-assistant {
+  align-self: flex-start;
+  background: var(--ping-gray);
+  color: var(--ping-text);
+  border-bottom-left-radius: 3px;
+  border: 1px solid var(--ping-border);
+}
+
+.agent-msg-assistant.agent-msg-done {
+  border-color: #a78bfa;
+}
+
+/* Chat-input row */
+.agent-chat-row {
+  display: flex;
+  gap: .4rem;
+}
+
+.agent-chat-input {
+  flex: 1;
+  min-width: 0;
+  padding: .35rem .5rem;
+  font-size: .82rem;
+  border: 1px solid var(--ping-border);
+  border-radius: var(--radius);
+  background: #fff;
+  color: var(--ping-text);
+}
+
+.agent-chat-input:focus {
+  outline: 2px solid var(--ping-blue);
+  outline-offset: -1px;
+}
+
+/* ------------------------------------------------------------
    Responsive — collapse to single column below 900px
 ------------------------------------------------------------ */
 

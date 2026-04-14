@@ -1,0 +1,48 @@
+{
+  "siteLabel": "accessories",
+  "description": "WebMCP Retail demo — accessories store with WebMCP + AG-UI custom agent support",
+  "tools": [
+    {
+      "name": "view_products",
+      "description": "Fetches the product catalog from the backend API. Requires an active user session.",
+      "parameters": {},
+      "annotations": { "readOnlyHint": "true" }
+    },
+    {
+      "name": "add_to_cart",
+      "description": "Adds a product to the shopping cart by product ID and quantity.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "product_id": { "type": "string", "description": "Product ID from the catalog" },
+          "quantity":   { "type": "integer", "description": "Number of units to add", "minimum": 1 }
+        },
+        "required": ["product_id", "quantity"]
+      }
+    },
+    {
+      "name": "view_cart",
+      "description": "Returns the current cart contents and total as JSON. Requires an active user session.",
+      "parameters": {},
+      "annotations": { "readOnlyHint": "true" }
+    },
+    {
+      "name": "remove_from_cart",
+      "description": "Removes a product entirely from the cart by product ID. Dynamically registered — only available when the cart contains items.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "product_id": { "type": "string", "description": "Product ID to remove" }
+        },
+        "required": ["product_id"]
+      },
+      "dynamic": true
+    },
+    {
+      "name": "checkout",
+      "description": "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. Requires user confirmation via WebMCP Elicitation before the request is sent. Dynamically registered — only available when the cart contains items.",
+      "parameters": {},
+      "dynamic": true
+    }
+  ]
+}
