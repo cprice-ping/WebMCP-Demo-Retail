@@ -265,7 +265,9 @@ async function startLogin() {
 // Same OIDC authorization request as startLogin(), but opened in a popup so
 // the tool's execute() promise can keep polling while the user completes the
 // DaVinci OOB HILT challenge (e.g. PingOne Verify approval on their phone).
-// The flow is selected via acr_values when LOGIN_FLOW_POLICY_ID is set;
+// Flow routing is handled PingOne-side: the dedicated agentic client's
+// sign-on policy maps to the OOB flow policy, so authorizing against that
+// client lands in the right flow with no acr_values plumbing.
 // login_hint pre-fills the identity the agent collected from the user.
 async function buildAuthorizeUrl({ loginHint, verifier, state, nonce, clientId }) {
   const challenge = await sha256Base64url(verifier);
@@ -281,11 +283,6 @@ async function buildAuthorizeUrl({ loginHint, verifier, state, nonce, clientId }
     nonce,
   });
 
-  // Route at the OOB HILT flow policy when configured (DaVinci sign-on policy
-  // can also route without acr_values — this just makes the tool deterministic).
-  if (CONFIG.LOGIN_FLOW_POLICY_ID) {
-    params.set("acr_values", CONFIG.LOGIN_FLOW_POLICY_ID);
-  }
   // DaVinci reads this as global.parameters.authorizationRequest.login_hint —
   // the flow uses it to address the OOB challenge without asking again in-page.
   if (loginHint) {
@@ -536,8 +533,7 @@ async function loginToolHandler(args, executeOptions) {
   setLoginToolStatus(`Opening sign-in for ${confirmed.email}… complete the verification to continue.`);
   logToolEvent(
     `[login] authorize request opened for ${confirmed.email}` +
-    (usingAgenticClient ? ` — agentic client ${clientId}` : "") +
-    (CONFIG.LOGIN_FLOW_POLICY_ID ? ` (flow policy: ${CONFIG.LOGIN_FLOW_POLICY_ID})` : "")
+    (usingAgenticClient ? ` — agentic client ${clientId} (OOB flow via its sign-on policy)` : "")
   );
 
   // Popup needs a user gesture — the modal's submit click provides it.

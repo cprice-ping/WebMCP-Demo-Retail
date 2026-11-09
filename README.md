@@ -53,7 +53,7 @@ Browser
 
 | Tool | Type | Auth required | Notes |
 |---|---|---|---|
-| `login` | OIDC popup + poll | Signed out only | Agent-initiated sign-in. Confirms the email in-page, opens the PingOne authorize request in a popup (optionally routed to the OOB HILT flow policy via `acr_values`), polls for the returned code, exchanges it for tokens. Unregisters itself once a session exists. |
+| `login` | OIDC popup + poll | Signed out only | Agent-initiated sign-in. Confirms the email in-page, opens the PingOne authorize request in a popup against the dedicated agentic client (whose sign-on policy routes to the OOB HILT flow), polls for the returned code, exchanges it for tokens. Unregisters itself once a session exists. |
 | `view_products` | `GET /api/products.json` | Session | `readOnlyHint: true`; populates `PRODUCTS[]` and renders the grid |
 | `add_to_cart` | Mutation | Session | Takes `product_id` + `quantity`; updates in-memory `cart{}` |
 | `view_cart` | Read | Session | `readOnlyHint: true`; returns cart contents + total as JSON |
@@ -101,8 +101,9 @@ The `login` tool lets an agent sign the user in without the button. The mechanis
 ```
 Agent calls login { email? }
   → In-page modal: user confirms the email (agent-passed emails are pre-filled, never silently trusted)
-  → Popup opens: GET /as/authorize (PKCE, state, nonce, login_hint=<email>,
-      optional acr_values=<LOGIN_FLOW_POLICY_ID> routing at the OOB HILT flow policy)
+  → Popup opens: GET /as/authorize (PKCE, state, nonce, login_hint=<email>)
+      — authorized against PINGONE_AGENTIC_CLIENT_ID when configured
+  → PingOne routes at the agentic client's sign-on policy → the OOB HILT DaVinci flow
   → DaVinci flow: reads global.parameters.authorizationRequest.login_hint,
       fires the OOB challenge (PingOne Verify push / email), user approves on their phone
   → PingOne redirects the popup to the app with ?code=…&state=…
@@ -117,10 +118,10 @@ Every termination path is surfaced to the agent as a readable result: user cance
 
 1. Build the flow: read `global.parameters.authorizationRequest.login_hint` → trigger the OOB challenge for that identity → on approval, look up the user → **Flow Control (Success)**.
 2. Create/assign a **DaVinci application + flow policy** for the flow.
-3. In PingOne, assign that flow policy to the SPA's sign-on policy — or set `LOGIN_FLOW_POLICY_ID` in `config.js` to target it via `acr_values` regardless of the default policy.
+3. In PingOne, map that flow policy to the **agentic client's** sign-on policy (`PINGONE_AGENTIC_CLIENT_ID`) — tool logins route to the OOB flow automatically; button logins on the main client keep the default policy.
 4. The redirect URI is the same one already registered (`PINGONE_REDIRECT_URI`) — the popup is the app itself.
 
-This is agent-initiated HILT: the identity was collected by the agent, the human approved it out-of-band on a device they hold, and the resulting code lands in the same session the button produces — no second client, no token endpoint changes.
+This is agent-initiated HILT: the identity was collected by the agent, the human approved it out-of-band on a device they hold, and the resulting code lands in a session marked as agent-initiated by the agentic client's `client_id` — which the server forwards to PingOne Authorize as `WebMCP.Request.clientId` for policy conditioning.
 
 ---
 
