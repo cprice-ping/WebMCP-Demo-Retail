@@ -21,7 +21,7 @@
   --accent:       #e3001b;
   --accent-hover: #b50016;
 
-  --green:  #16a34a;
+  --green:  #15803d;
   --amber:  #b45309;
   --red:    #dc2626;
 
@@ -166,6 +166,23 @@ code, .mono {
   margin: 0;
   font-size: .75rem;
   color: var(--ping-muted);
+}
+
+/* Agent-initiated login status strip (login tool polling feedback) */
+.login-tool-status {
+  margin: .75rem 0 0;
+  font-size: .8rem;
+  color: var(--ping-blue);
+  min-height: 1.2em;
+}
+.login-tool-status:empty { display: none; }
+
+/* Agent-initiated login email modal — single-line email, not OTP-sized */
+.login-email-input {
+  font-size: 1rem;
+  letter-spacing: normal;
+  text-align: left;
+  text-transform: none;
 }
 
 /* ------------------------------------------------------------
@@ -414,7 +431,7 @@ code, .mono {
   box-shadow: 0 20px 60px rgba(0,0,0,.2);
 }
 
-.modal-card h3 { margin: 0 0 .75rem; }
+.modal-card h2, .modal-card h3 { margin: 0 0 .75rem; }
 
 .modal-summary {
   white-space: pre-line;
@@ -618,7 +635,7 @@ code, .mono {
   padding: 1px 7px;
   font-size: .7rem;
   font-weight: 600;
-  color: var(--ping-muted);
+  color: var(--ping-text);
 }
 
 .panel-badge-key {
@@ -904,7 +921,7 @@ code, .mono {
   padding: 1px 5px;
   border-radius: 3px;
   background: var(--ping-border);
-  color: var(--ping-muted);
+  color: var(--ping-text);
 }
 
 .token-tab-active .token-tab-badge {

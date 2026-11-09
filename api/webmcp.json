@@ -3,11 +3,25 @@
   "description": "WebMCP Retail demo — accessories store with WebMCP + AG-UI custom agent support",
   "tools": [
     {
+      "name": "login",
+      "title": "Login",
+      "description": "Signs the user in via PingOne. Opens a sign-in window where the user completes out-of-band verification (e.g. approving on their phone); polls until sign-in completes. Optionally pass the user's email address to pre-fill the sign-in — the user always confirms it in-page before the window opens. Only usable when signed out.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "email": { "type": "string", "description": "The user's email address, if known. Shown to the user for confirmation before sign-in starts." }
+        },
+        "required": []
+      },
+      "annotations": { "readOnlyHint": false, "consequentialHint": false }
+    },
+    {
       "name": "view_products",
       "title": "View Products",
       "description": "Fetches the product catalog from the backend API. Requires an active user session.",
       "parameters": {},
-      "annotations": { "readOnlyHint": true }
+      "annotations": { "readOnlyHint": true },
+      "requiresSession": true
     },
     {
       "name": "add_to_cart",
@@ -20,14 +34,16 @@
           "quantity":   { "type": "integer", "description": "Number of units to add", "minimum": 1 }
         },
         "required": ["product_id", "quantity"]
-      }
+      },
+      "requiresSession": true
     },
     {
       "name": "view_cart",
       "title": "View Cart",
       "description": "Returns the current cart contents and total as JSON. Requires an active user session.",
       "parameters": {},
-      "annotations": { "readOnlyHint": true }
+      "annotations": { "readOnlyHint": true },
+      "requiresSession": true
     },
     {
       "name": "remove_from_cart",

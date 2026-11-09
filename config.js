@@ -20,6 +20,12 @@ const CONFIG = {
   // OIDC scopes to request
   PINGONE_SCOPES: "openid profile email",
 
+  // DaVinci flow policy ID for the agent-initiated login tool (OOB HILT).
+  // Sent as acr_values on the authorize request so the tool routes to the
+  // OOB flow even if the app's default sign-on policy is a different flow.
+  // Leave empty to use the application's default sign-on policy.
+  LOGIN_FLOW_POLICY_ID: "",
+
   // AG-UI Custom Agent WebSocket endpoint.
   // Set to a wss:// URL to enable the Custom Agent panel and auto-connect on sign-in.
   // Leave empty to hide the agent panel (BCA-only demo mode).

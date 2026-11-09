@@ -261,6 +261,57 @@ async function startLogin() {
   window.location.href = `${CONFIG.PINGONE_AS_BASE}/authorize?${params}`;
 }
 
+// ── Agent-initiated login (WebMCP login tool) ─────────────────────────
+// Same OIDC authorization request as startLogin(), but opened in a popup so
+// the tool's execute() promise can keep polling while the user completes the
+// DaVinci OOB HILT challenge (e.g. PingOne Verify approval on their phone).
+// The flow is selected via acr_values when LOGIN_FLOW_POLICY_ID is set;
+// login_hint pre-fills the identity the agent collected from the user.
+async function buildAuthorizeUrl({ loginHint, verifier, state, nonce }) {
+  const challenge = await sha256Base64url(verifier);
+
+  const params = new URLSearchParams({
+    response_type: "code",
+    client_id: CONFIG.PINGONE_CLIENT_ID,
+    redirect_uri: CONFIG.PINGONE_REDIRECT_URI,
+    scope: CONFIG.PINGONE_SCOPES,
+    state,
+    code_challenge: challenge,
+    code_challenge_method: "S256",
+    nonce,
+  });
+
+  // Route at the OOB HILT flow policy when configured (DaVinci sign-on policy
+  // can also route without acr_values — this just makes the tool deterministic).
+  if (CONFIG.LOGIN_FLOW_POLICY_ID) {
+    params.set("acr_values", CONFIG.LOGIN_FLOW_POLICY_ID);
+  }
+  // DaVinci reads this as global.parameters.authorizationRequest.login_hint —
+  // the flow uses it to address the OOB challenge without asking again in-page.
+  if (loginHint) {
+    params.set("login_hint", loginHint);
+  }
+
+  return `${CONFIG.PINGONE_AS_BASE}/authorize?${params}`;
+}
+
+// Shared PKCE + state bookkeeping for both button and tool logins.
+// Returns { authorizeUrl, verifier, state } — caller opens the URL.
+async function createLoginSession({ loginHint } = {}) {
+  const verifier = randomBase64url(64);
+  const state    = randomBase64url(16);
+  const nonce    = randomBase64url(16);
+
+  sessionStorage.setItem("pkce_verifier", verifier);
+  sessionStorage.setItem("oauth_state", state);
+
+  const authorizeUrl = await buildAuthorizeUrl({
+    loginHint, verifier, state, nonce,
+  });
+
+  return { authorizeUrl, verifier, state };
+}
+
 // Silent token refresh using prompt=none.
 // The AS checks its own session cookie (longer-lived than our id_token) and
 // issues fresh tokens without showing the user any UI.
@@ -314,6 +365,206 @@ async function exchangeCode(code) {
   }
 
   return resp.json();
+}
+
+// ============================================================
+// Agent-initiated login (WebMCP login tool)
+// The tool opens the OIDC authorize request in a popup; the DaVinci
+// flow behind it runs the OOB HILT challenge (user approves on their
+// phone); PingOne redirects the popup back with ?code=; the popup
+// relays the code to this window (postMessage + localStorage stash)
+// and closes. The tool polls for the relay while the popup is out.
+// ============================================================
+
+const LOGIN_RELAY_KEY = "webmcp_login_relay";
+
+// Tool execution may be aborted by the agent (ToolExecuteCallbackOptions.signal).
+// The polling loop and the popup both shut down cleanly on abort.
+function pollForLoginRelay({ timeoutMs = 180_000, intervalMs = 1_000, signal = null, popup = null } = {}) {
+  return new Promise((resolve) => {
+    const started = Date.now();
+    let settled = false;
+
+    function settle(value) {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener("message", onMessage);
+      window.removeEventListener("storage", onStorage);
+      if (signal) signal.removeEventListener("abort", onAbort);
+      if (timer) clearInterval(timer);
+      resolve(value);
+    }
+
+    function onAbort() {
+      if (popup && !popup.closed) popup.close();
+      settle({ cancelled: true, reason: "Tool execution cancelled by the agent" });
+    }
+
+    function onMessage(e) {
+      if (e.origin !== window.location.origin) return;
+      const d = e.data;
+      if (!d || d.type !== "webmcp_login_relay") return;
+      settle(d);
+    }
+
+    // Fallback path: the popup stashes the relay payload in localStorage
+    // (survives postMessage restrictions and popup-blocker races).
+    function checkStorage() {
+      try {
+        const raw = localStorage.getItem(LOGIN_RELAY_KEY);
+        if (!raw) return;
+        localStorage.removeItem(LOGIN_RELAY_KEY);
+        const d = JSON.parse(raw);
+        if (d && d.type === "webmcp_login_relay") settle(d);
+      } catch { /* ignore */ }
+    }
+
+    function onStorage(e) {
+      if (e.key === LOGIN_RELAY_KEY && e.newValue) checkStorage();
+    }
+
+    const onAbortRef = onAbort;
+    if (signal) {
+      if (signal.aborted) { onAbortRef(); return; }
+      signal.addEventListener("abort", onAbortRef, { once: true });
+    }
+    window.addEventListener("message", onMessage);
+    window.addEventListener("storage", onStorage);
+
+    const timer = setInterval(() => {
+      checkStorage();
+
+      if (Date.now() - started > timeoutMs) {
+        if (popup && !popup.closed) popup.close();
+        settle({ error: "Login timed out — the user did not complete sign-in within 3 minutes." });
+        return;
+      }
+
+      // If the user closed the popup without completing, surface that as
+      // a cancel so the agent can explain and offer a retry.
+      if (popup && popup.closed) {
+        // Give the relay a beat to land before declaring closure (the popup
+        // posts the message and closes in the same tick — the message may
+        // still be in flight when the 'close' event is observed).
+        setTimeout(() => {
+          if (!settled) settle({ cancelled: true, reason: "Login window was closed before sign-in completed" });
+        }, 750);
+        return;
+      }
+    }, intervalMs);
+  });
+}
+
+// Email-entry modal for the login tool. Resolves { email } on submit or
+// { cancelled } — mirrors the checkout modal's contract. An email the agent
+// passed is pre-filled but still requires the human to confirm (submit).
+function showLoginEmailModal({ suggestedEmail } = {}) {
+  return new Promise((resolvePromise) => {
+    const modal = document.getElementById("modal-login-email");
+    const input = document.getElementById("login-email-input");
+    const hint  = document.getElementById("login-email-hint");
+
+    if (hint) hint.textContent = suggestedEmail
+      ? `The assistant wants to sign you in as ${suggestedEmail}. Confirm your email — a sign-in window will open and you'll complete verification there (e.g. approve on your phone).`
+      : "The assistant needs you to sign in. Enter your email — a sign-in window will open and you'll complete verification there (e.g. approve on your phone).";
+    if (input) input.value = suggestedEmail ?? "";
+    modal.classList.remove("hidden");
+    requestAnimationFrame(() => input?.focus());
+
+    const submit = document.getElementById("login-email-submit");
+    const cancel = document.getElementById("login-email-cancel");
+
+    function cleanup() {
+      modal.classList.add("hidden");
+      submit.replaceWith(submit.cloneNode(true));
+      cancel.replaceWith(cancel.cloneNode(true));
+    }
+
+    function trySubmit() {
+      const email = (input?.value ?? "").trim();
+      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return;
+      cleanup();
+      resolvePromise({ email });
+    }
+
+    document.getElementById("login-email-submit").addEventListener("click", trySubmit, { once: true });
+    document.getElementById("login-email-cancel").addEventListener("click", () => {
+      cleanup();
+      resolvePromise({ cancelled: true, reason: "User cancelled login" });
+    }, { once: true });
+    input?.addEventListener("keydown", function onKey(e) {
+      if (e.key === "Enter") { input.removeEventListener("keydown", onKey); trySubmit(); }
+    });
+  });
+}
+
+// Status strip shown in the login view while the OOB challenge is pending.
+function setLoginToolStatus(msg) {
+  const el = document.getElementById("login-tool-status");
+  if (el) el.textContent = msg ?? "";
+}
+
+async function loginToolHandler(args, executeOptions) {
+  const abortSignal = executeOptions?.signal ?? null;
+  const requestedEmail = typeof args?.email === "string" ? args.email.trim() : "";
+
+  // Always confirm the email in-page before launching — the agent may pass
+  // an address, and the human gets a final say over whose identity is used.
+  const confirmed = await showLoginEmailModal({ suggestedEmail: requestedEmail });
+  if (confirmed.cancelled) return confirmed;
+
+  const { authorizeUrl, state } = await createLoginSession({ loginHint: confirmed.email });
+
+  setLoginToolStatus(`Opening sign-in for ${confirmed.email}… complete the verification to continue.`);
+  logToolEvent(`[login] authorize request opened for ${confirmed.email}${CONFIG.LOGIN_FLOW_POLICY_ID ? ` (flow policy: ${CONFIG.LOGIN_FLOW_POLICY_ID})` : ""}`);
+
+  // Popup needs a user gesture — the modal's submit click provides it.
+  const popup = window.open(authorizeUrl, "webmcp_login", "width=460,height=720");
+
+  if (!popup) {
+    setLoginToolStatus("");
+    return { error: "The sign-in window was blocked by the browser. Please allow popups for this site and try again." };
+  }
+
+  const relay = await pollForLoginRelay({ signal: abortSignal, popup });
+
+  if (relay.cancelled) { setLoginToolStatus(""); return relay; }
+  if (relay.error)     { setLoginToolStatus(relay.error); return relay; }
+
+  if (relay.state !== state) {
+    setLoginToolStatus("");
+    return { error: "State mismatch in login relay — possible CSRF. Login aborted." };
+  }
+
+  setLoginToolStatus("Completing sign-in…");
+  logToolEvent("[login] authorization code received — exchanging for tokens");
+
+  try {
+    const tokens = await exchangeCode(relay.code);
+    idTokenRaw = tokens.id_token;
+    idTokenClaims = parseJwt(idTokenRaw);
+
+    sessionStorage.setItem("id_token", idTokenRaw);
+    sessionStorage.setItem("access_token", tokens.access_token || "");
+
+    setLoginToolStatus("");
+    await mountApp();
+    logToolEvent(`[login] session established for ${idTokenClaims?.name ?? confirmed.email}`);
+
+    return {
+      success: true,
+      user: {
+        name:  idTokenClaims?.name ?? idTokenClaims?.preferred_username ?? null,
+        email: idTokenClaims?.email ?? confirmed.email,
+      },
+      note: "User completed out-of-band verification. The storefront is now signed in and all other tools are usable.",
+    };
+  } catch (err) {
+    const message = err?.message || String(err);
+    logToolEvent(`[login] token exchange failed: ${message}`, "error");
+    setLoginToolStatus(`Sign-in failed: ${message}`);
+    return { error: `Token exchange failed: ${message}` };
+  }
 }
 
 // ============================================================
@@ -631,92 +882,131 @@ function requireSession() {
   };
 }
 
-// Tool: view_products
-registerTool(
-  "view_products",
-  {
-    title: "View Products",
-    description: "Fetches the product catalog from the backend API. Requires an active user session.",
-    parameters: {},
-    annotations: { readOnlyHint: true },
-    ui: {
-      labels: [{text:"GET"}, {text:"API", cls:"tool-label-api"}],
-      desc: "GET <code>/api/products.json</code> — fetches catalog from the backend.",
+// Tool: login — agent-initiated sign-in via OIDC popup + DaVinci OOB HILT.
+// Registered at boot; unregistered in mountApp() once a session exists
+// (signing in again is a button action at that point).
+const LOGIN_TOOL_DESCRIPTOR = {
+  title: "Login",
+  description: "Signs the user in via PingOne. Opens a sign-in window where the user completes out-of-band verification (e.g. approving on their phone); polls until sign-in completes. Optionally pass the user's email address to pre-fill the sign-in — the user always confirms it in-page before the window opens. Only usable when signed out.",
+  parameters: {
+    type: "object",
+    properties: {
+      email: { type: "string", description: "The user's email address, if known. Shown to the user for confirmation before sign-in starts." },
     },
+    required: [],
   },
-  async () => {
-    const sessionError = requireSession();
-    if (sessionError) return sessionError;
-    const data = await apiRequest("GET", "/products.json");
-    if (data?.products) {
-      PRODUCTS.length = 0;
-      data.products.forEach(p => PRODUCTS.push({ ...p, emoji: p.emoji || "📦" }));
-      renderProducts();
-    }
-    return data;
+  ui: {
+    labels: [{text:"OIDC", cls:"tool-label-api"}, {text:"OOB", cls:"tool-label-auth"}, {text:"POLL", cls:"tool-label-mutate"}],
+    desc: "Opens the PingOne authorize request in a popup, runs the DaVinci OOB HILT flow, polls for the returned code, then exchanges it for tokens.",
+    inputs: false,
+  },
+};
+
+// Tool: login — static registration; unregistered once a session exists.
+registerTool("login", LOGIN_TOOL_DESCRIPTOR, loginToolHandler);
+
+// ── Store tools ──────────────────────────────────────────────
+// Defined here but registered in mountApp() once a session exists, so the
+// initial page exposes only the login tool (spec: register tools when they
+// make sense for the page state, unregister/re-register when they don't).
+
+// Tool: view_products
+const VIEW_PRODUCTS_DESCRIPTOR = {
+  title: "View Products",
+  description: "Fetches the product catalog from the backend API. Requires an active user session.",
+  parameters: {},
+  annotations: { readOnlyHint: true },
+  ui: {
+    labels: [{text:"GET"}, {text:"API", cls:"tool-label-api"}],
+    desc: "GET <code>/api/products.json</code> — fetches catalog from the backend.",
+  },
+};
+
+async function viewProductsHandler() {
+  const sessionError = requireSession();
+  if (sessionError) return sessionError;
+  const data = await apiRequest("GET", "/products.json");
+  if (data?.products) {
+    PRODUCTS.length = 0;
+    data.products.forEach(p => PRODUCTS.push({ ...p, emoji: p.emoji || "📦" }));
+    renderProducts();
   }
-);
+  return data;
+}
 
 // Tool: add_to_cart
-registerTool(
-  "add_to_cart",
-  {
-    title: "Add to Cart",
-    description: "Adds a product to the shopping cart by product ID and quantity.",
-    parameters: {
-      type: "object",
-      properties: {
-        product_id: { type: "string", description: "Product ID from the catalog" },
-        quantity:   { type: "integer", description: "Number of units to add", minimum: 1 },
-      },
-      required: ["product_id", "quantity"],
+const ADD_TO_CART_DESCRIPTOR = {
+  title: "Add to Cart",
+  description: "Adds a product to the shopping cart by product ID and quantity.",
+  parameters: {
+    type: "object",
+    properties: {
+      product_id: { type: "string", description: "Product ID from the catalog" },
+      quantity:   { type: "integer", description: "Number of units to add", minimum: 1 },
     },
-    ui: {
-      labels: [{text:"MUTATE", cls:"tool-label-mutate"}],
-      desc: "Adds a product to the cart by product ID and quantity.",
-      inputs: true,
-    },
+    required: ["product_id", "quantity"],
   },
-  async ({ product_id, quantity }) => {
-    const sessionError = requireSession();
-    if (sessionError) return sessionError;
-    const product = PRODUCTS.find(p => p.id === product_id);
-    if (!product) {
-      return { error: `Product "${product_id}" not found` };
-    }
-    const qty = Math.max(1, parseInt(quantity, 10) || 1);
-    cart[product_id] = (cart[product_id] || 0) + qty;
-    renderCart();
-    return {
-      success: true,
-      added: { product_id, name: product.name, quantity: qty },
-      cart_summary: cartSummary(),
-    };
+  ui: {
+    labels: [{text:"MUTATE", cls:"tool-label-mutate"}],
+    desc: "Adds a product to the cart by product ID and quantity.",
+    inputs: true,
+  },
+};
+
+async function addToCartHandler({ product_id, quantity }) {
+  const sessionError = requireSession();
+  if (sessionError) return sessionError;
+  const product = PRODUCTS.find(p => p.id === product_id);
+  if (!product) {
+    return { error: `Product "${product_id}" not found` };
   }
-);
+  const qty = Math.max(1, parseInt(quantity, 10) || 1);
+  cart[product_id] = (cart[product_id] || 0) + qty;
+  renderCart();
+  return {
+    success: true,
+    added: { product_id, name: product.name, quantity: qty },
+    cart_summary: cartSummary(),
+  };
+}
 
 // Tool: view_cart
-registerTool(
-  "view_cart",
-  {
-    title: "View Cart",
-    description: "Returns the current cart contents and total as JSON. Requires an active user session.",
-    parameters: {},
-    annotations: { readOnlyHint: true },
-    ui: {
-      labels: [{text:"GET"}],
-      desc: "Returns current cart items, item count, and total as JSON.",
-    },
+const VIEW_CART_DESCRIPTOR = {
+  title: "View Cart",
+  description: "Returns the current cart contents and total as JSON. Requires an active user session.",
+  parameters: {},
+  annotations: { readOnlyHint: true },
+  ui: {
+    labels: [{text:"GET"}],
+    desc: "Returns current cart items, item count, and total as JSON.",
   },
-  async () => {
-    const sessionError = requireSession();
-    if (sessionError) return sessionError;
-    return {
-      ...cartSummary(),
-      item_count: Object.values(cart).reduce((n, qty) => n + qty, 0),
-    };
+};
+
+async function viewCartHandler() {
+  const sessionError = requireSession();
+  if (sessionError) return sessionError;
+  return {
+    ...cartSummary(),
+    item_count: Object.values(cart).reduce((n, qty) => n + qty, 0),
+  };
+}
+
+// Register the store tools once the user is signed in. Idempotent — safe to
+// call on every mountApp(); re-login after sign-out lands on a fresh page.
+function registerStoreTools() {
+  for (const [name, descriptor, handler] of [
+    ["view_products", VIEW_PRODUCTS_DESCRIPTOR, viewProductsHandler],
+    ["add_to_cart",   ADD_TO_CART_DESCRIPTOR,   addToCartHandler],
+    ["view_cart",     VIEW_CART_DESCRIPTOR,     viewCartHandler],
+  ]) {
+    if (!(name in toolRegistry)) {
+      registerTool(name, descriptor, handler);
+      logToolEvent(`[tools] ${name} registered — session active`);
+    }
   }
-);
+  renderToolCards();
+  if (typeof notifyToolsUpdate === "function") notifyToolsUpdate();
+}
 
 // Tool: remove_from_cart — registered dynamically via syncCartTools() when cart has items
 const REMOVE_FROM_CART_DESCRIPTOR = {
@@ -1512,6 +1802,22 @@ async function handleCallback() {
 
   if (!code) return false; // not a callback
 
+  // ── Popup relay mode ─────────────────────────────────────────
+  // This window was opened by the login tool. Hand the code back to the
+  // opener (postMessage to same-origin opener + localStorage stash) and
+  // close immediately. The opener owns state validation and the exchange.
+  if (window.opener && window.opener !== window) {
+    try {
+      const relay = { type: "webmcp_login_relay", code, state, error };
+      window.opener.postMessage(relay, window.location.origin);
+      try { localStorage.setItem(LOGIN_RELAY_KEY, JSON.stringify(relay)); } catch { /* private mode */ }
+      setTimeout(() => window.close(), 150);
+      // Show nothing while closing — the opener drives all UX.
+      document.body.textContent = "Sign-in complete — you can close this window.";
+      return true;
+    } catch { /* fall through to normal callback handling */ }
+  }
+
   // Validate state
   const storedState = sessionStorage.getItem("oauth_state");
   if (state !== storedState) {
@@ -1546,6 +1852,17 @@ async function handleCallback() {
 }
 
 async function mountApp() {
+  // A session now exists — the login tool no longer makes sense for this
+  // page state (spec: register tools when they make sense, unregister
+  // when they don't). Re-login is the Sign out → login path.
+  if (toolRegistry.login) {
+    unregisterTool("login");
+    logToolEvent("[tools] login unregistered — session established");
+  }
+
+  // Session is active — the store tools become available.
+  registerStoreTools();
+
   // Use the tool to load products — same code path as an agent call.
   // This means the API fetch, logging, and error handling are unified
   // whether the caller is the webapp itself or an MCP agent.
