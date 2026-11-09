@@ -37,32 +37,9 @@
           Sign in with PingOne
         </button>
 
-        <p id="login-tool-status" class="login-tool-status" role="status"></p>
-
         <p class="login-footnote">
           Auth via PingOne OIDC &mdash; <code id="login-scope"></code>
         </p>
-      </div>
-    </div>
-
-    <!-- Agent-initiated login: email confirmation modal -->
-    <div id="modal-login-email" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="login-email-title">
-      <div class="modal-backdrop"></div>
-      <div class="modal-card">
-        <h2 id="login-email-title">Assistant-Requested Sign-In</h2>
-        <p id="login-email-hint" class="modal-summary"></p>
-        <div class="modal-note">
-          <span class="elicitation-label">User Confirmation</span>
-          <span id="login-email-note">The sign-in window opens after you continue.</span>
-        </div>
-        <div id="login-email-input-row" class="otp-input-row">
-          <input id="login-email-input" type="email" autocomplete="email"
-                 placeholder="you@example.com" class="otp-input login-email-input" />
-        </div>
-        <div class="modal-actions">
-          <button id="login-email-cancel" class="btn-ghost">Cancel</button>
-          <button id="login-email-submit" class="btn-primary">Continue</button>
-        </div>
       </div>
     </div>
   </div>

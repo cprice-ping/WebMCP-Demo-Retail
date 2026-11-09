@@ -53,7 +53,7 @@ Browser
 
 | Tool | Type | Auth required | Notes |
 |---|---|---|---|
-| `login` | OIDC popup + poll | Signed out only | Agent-initiated sign-in. The agent asks the user for their email in chat and passes it to the tool; the user approves on one click (the gesture the popup needs) and completes OOB verification in the opened window. Unregisters itself once a session exists. |
+| `login` | OIDC in-tab redirect | Signed out only | Agent-initiated sign-in. The agent asks the user for their email in chat and passes it to the tool; the tab navigates to PingOne, the user completes OOB verification (e.g. approves on their phone), and the app returns signed in via the callback. Unregisters itself once a session exists. |
 | `view_products` | `GET /api/products.json` | Session | `readOnlyHint: true`; populates `PRODUCTS[]` and renders the grid |
 | `add_to_cart` | Mutation | Session | Takes `product_id` + `quantity`; updates in-memory `cart{}` |
 | `view_cart` | Read | Session | `readOnlyHint: true`; returns cart contents + total as JSON |
@@ -96,33 +96,30 @@ Because the tool and DOM share the same process, no round-trip protocol is neede
 
 ### Agent-initiated login (`login` tool)
 
-The `login` tool lets an agent sign the user in without the button. The mechanism is the same OIDC authorization-code + PKCE request as the button, opened in a **popup** so the tool's `execute()` promise can keep polling while the user completes sign-in out-of-band:
+The `login` tool lets an agent sign the user in without the button. The mechanism is the same OIDC authorization-code + PKCE request as the button, as a **full-page redirect**: the tool navigates the tab to PingOne, and execution ends there (the spec defines `AbortError` for "target document unloaded" — this is the expected pattern for navigating tools). The agent observes the outcome through page state: after the callback, `mountApp()` registers the store tools and the host's `ontoolchange` fires.
 
 ```
 Agent calls login { email }
   (the agent asks the user for their email in chat first — required parameter)
-  → In-page one-click confirm: shows the identity; the user's click both
-      approves it and provides the user activation the popup needs
-      (typing fallback only if the agent called without an email)
-  → Popup opens: GET /as/authorize (PKCE, state, nonce, login_hint=<email>)
+  → Tool navigates the tab: GET /as/authorize (PKCE, state, nonce, login_hint=<email>)
       — authorized against PINGONE_AGENTIC_CLIENT_ID when configured
   → PingOne routes at the agentic client's sign-on policy → the OOB HILT DaVinci flow
   → DaVinci flow: reads global.parameters.authorizationRequest.login_hint,
       fires the OOB challenge (PingOne Verify push / email), user approves on their phone
-  → PingOne redirects the popup to the app with ?code=…&state=…
-  → Popup relays { code, state } to the opener via postMessage + a localStorage stash, then closes
-  → Tool polls (1s interval, 3min timeout, abortable via the spec's signal), validates state,
-      exchanges the code with the same exchangeCode() the button uses → tokens → mountApp()
+  → PingOne redirects the tab back to the app with ?code=…&state=…
+  → handleCallback() validates state, exchanges the code (same exchangeCode() as the
+      button) → tokens → sessionStorage → mountApp()
+  → Session lands in the tab; store tools register; the agent continues on page state
 ```
 
-Every termination path is surfaced to the agent as a readable result: user cancelled, popup blocked, window closed early, timeout, state mismatch, or token-exchange failure. If the agent aborts the in-flight call (`ToolExecuteCallbackOptions.signal`), the popup is closed and polling stops immediately.
+No popup, no in-page confirmation UI, no relay: a main-frame navigation needs no user gesture, so the tool works identically whether invoked by the extension, a native WebMCP browser, or the page's own console. The one-click email modal was removed with the popup design.
 
 **DaVinci flow setup** (the OOB HILT flow behind the tool):
 
 1. Build the flow: read `global.parameters.authorizationRequest.login_hint` → trigger the OOB challenge for that identity → on approval, look up the user → **Flow Control (Success)**.
 2. Create/assign a **DaVinci application + flow policy** for the flow.
 3. In PingOne, map that flow policy to the **agentic client's** sign-on policy (`PINGONE_AGENTIC_CLIENT_ID`) — tool logins route to the OOB flow automatically; button logins on the main client keep the default policy.
-4. The redirect URI is the same one already registered (`PINGONE_REDIRECT_URI`) — the popup is the app itself.
+4. The redirect URI is the same one already registered (`PINGONE_REDIRECT_URI`) — the tab itself returns to the app.
 
 This is agent-initiated HILT: the identity was collected by the agent, the human approved it out-of-band on a device they hold, and the resulting code lands in a session marked as agent-initiated by the agentic client's `client_id` — which the server forwards to PingOne Authorize as `WebMCP.Request.clientId` for policy conditioning.
 

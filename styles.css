@@ -168,23 +168,6 @@ code, .mono {
   color: var(--ping-muted);
 }
 
-/* Agent-initiated login status strip (login tool polling feedback) */
-.login-tool-status {
-  margin: .75rem 0 0;
-  font-size: .8rem;
-  color: var(--ping-blue);
-  min-height: 1.2em;
-}
-.login-tool-status:empty { display: none; }
-
-/* Agent-initiated login email modal — single-line email, not OTP-sized */
-.login-email-input {
-  font-size: 1rem;
-  letter-spacing: normal;
-  text-align: left;
-  text-transform: none;
-}
-
 /* ------------------------------------------------------------
    Top nav
 ------------------------------------------------------------ */

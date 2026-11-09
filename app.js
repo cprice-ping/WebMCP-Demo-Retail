@@ -262,9 +262,7 @@ async function startLogin() {
 }
 
 // ── Agent-initiated login (WebMCP login tool) ─────────────────────────
-// Same OIDC authorization request as startLogin(), but opened in a popup so
-// the tool's execute() promise can keep polling while the user completes the
-// DaVinci OOB HILT challenge (e.g. PingOne Verify approval on their phone).
+// Same OIDC authorization request as startLogin(), navigated in-tab.
 // Flow routing is handled PingOne-side: the dedicated agentic client's
 // sign-on policy maps to the OOB flow policy, so authorizing against that
 // client lands in the right flow with no acr_values plumbing.
@@ -376,248 +374,65 @@ async function exchangeCode(code) {
 
 // ============================================================
 // Agent-initiated login (WebMCP login tool)
-// The tool opens the OIDC authorize request in a popup; the DaVinci
-// flow behind it runs the OOB HILT challenge (user approves on their
-// phone); PingOne redirects the popup back with ?code=; the popup
-// relays the code to this window (postMessage + localStorage stash)
-// and closes. The tool polls for the relay while the popup is out.
+// The tool navigates the tab to the OIDC authorize request — same
+// full-page redirect as the sign-in button, so no popup/gesture issues.
+// The DaVinci flow behind it runs the OOB HILT challenge (user approves
+// on their phone); PingOne redirects back to the app with ?code= and
+// handleCallback() establishes the session exactly as the button does.
+// The tool's own execution ends at navigation (spec: AbortError when the
+// target document unloads) — the agent observes the outcome via the tab's
+// page state: view_products/view_cart/view_cart register via ontoolchange.
 // ============================================================
 
-const LOGIN_RELAY_KEY = "webmcp_login_relay";
+async function loginToolHandler(args) {
+  let email = typeof args?.email === "string" ? args.email.trim() : "";
 
-// Tool execution may be aborted by the agent (ToolExecuteCallbackOptions.signal).
-// The polling loop and the popup both shut down cleanly on abort.
-function pollForLoginRelay({ timeoutMs = 180_000, intervalMs = 1_000, signal = null, popup = null } = {}) {
-  return new Promise((resolve) => {
-    const started = Date.now();
-    let settled = false;
-
-    function settle(value) {
-      if (settled) return;
-      settled = true;
-      window.removeEventListener("message", onMessage);
-      window.removeEventListener("storage", onStorage);
-      if (signal) signal.removeEventListener("abort", onAbort);
-      if (timer) clearInterval(timer);
-      resolve(value);
-    }
-
-    function onAbort() {
-      if (popup && !popup.closed) popup.close();
-      settle({ cancelled: true, reason: "Tool execution cancelled by the agent" });
-    }
-
-    function onMessage(e) {
-      if (e.origin !== window.location.origin) return;
-      const d = e.data;
-      if (!d || d.type !== "webmcp_login_relay") return;
-      settle(d);
-    }
-
-    // Fallback path: the popup stashes the relay payload in localStorage
-    // (survives postMessage restrictions and popup-blocker races).
-    function checkStorage() {
-      try {
-        const raw = localStorage.getItem(LOGIN_RELAY_KEY);
-        if (!raw) return;
-        localStorage.removeItem(LOGIN_RELAY_KEY);
-        const d = JSON.parse(raw);
-        if (d && d.type === "webmcp_login_relay") settle(d);
-      } catch { /* ignore */ }
-    }
-
-    function onStorage(e) {
-      if (e.key === LOGIN_RELAY_KEY && e.newValue) checkStorage();
-    }
-
-    const onAbortRef = onAbort;
-    if (signal) {
-      if (signal.aborted) { onAbortRef(); return; }
-      signal.addEventListener("abort", onAbortRef, { once: true });
-    }
-    window.addEventListener("message", onMessage);
-    window.addEventListener("storage", onStorage);
-
-    const timer = setInterval(() => {
-      checkStorage();
-
-      if (Date.now() - started > timeoutMs) {
-        if (popup && !popup.closed) popup.close();
-        settle({ error: "Login timed out — the user did not complete sign-in within 3 minutes." });
-        return;
-      }
-
-      // If the user closed the popup without completing, surface that as
-      // a cancel so the agent can explain and offer a retry.
-      if (popup && popup.closed) {
-        // Give the relay a beat to land before declaring closure (the popup
-        // posts the message and closes in the same tick — the message may
-        // still be in flight when the 'close' event is observed).
-        setTimeout(() => {
-          if (!settled) settle({ cancelled: true, reason: "Login window was closed before sign-in completed" });
-        }, 750);
-        return;
-      }
-    }, intervalMs);
-  });
-}
-
-// One-click confirmation modal for the login tool. The email is collected by
-// the AGENT in chat and passed as args.email — the modal never asks the human
-// to type. It exists for two reasons:
-//   1. Gesture: the extension invokes tools via the content script, so
-//      window.open() has no user activation in the page and the popup would
-//      be blocked without a click here.
-//   2. Transparency: the human sees exactly which identity is about to be
-//      used before the sign-in window opens.
-// Resolves { email, confirmed } on click, or { cancelled }.
-function showLoginEmailModal({ suggestedEmail } = {}) {
-  return new Promise((resolvePromise) => {
-    const modal    = document.getElementById("modal-login-email");
-    const input    = document.getElementById("login-email-input");
-    const inputRow = document.getElementById("login-email-input-row");
-    const hint     = document.getElementById("login-email-hint");
-    const note     = document.getElementById("login-email-note");
-    const submit   = document.getElementById("login-email-submit");
-
-    if (hint) hint.textContent = suggestedEmail
-      ? "The assistant wants to sign you in. Approving opens a sign-in window where you'll complete verification (e.g. approve on your phone)."
-      : "The assistant wants to sign you in but didn't say which account. Enter your email — a sign-in window will open and you'll complete verification there.";
-
-    const needsEmail = !suggestedEmail;
-    if (inputRow) inputRow.classList.toggle("hidden", !needsEmail);
-    if (input) input.value = "";
-    if (note) note.textContent = needsEmail
-      ? "Enter the address, then continue to open the sign-in window."
-      : `Sign-in will be started for ${suggestedEmail}.`;
-    if (submit) submit.textContent = needsEmail ? "Continue" : "Open Sign-In Window";
-    if (submit && needsEmail) submit.disabled = true;
-    if (submit && !needsEmail) submit.disabled = false;
-
-    modal.classList.remove("hidden");
-    if (needsEmail) requestAnimationFrame(() => input?.focus());
-
-    function cleanup() {
-      modal.classList.add("hidden");
-      submit.replaceWith(submit.cloneNode(true));
-      document.getElementById("login-email-cancel").replaceWith(
-        document.getElementById("login-email-cancel").cloneNode(true));
-    }
-
-    function resolveWith() {
-      // Agent-supplied email wins; the hidden input is only for the
-      // no-email fallback path. Validate whichever source is active.
-      const email = needsEmail ? (input?.value ?? "").trim() : suggestedEmail;
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return;
-      cleanup();
-      resolvePromise({ email, confirmed: true });
-    }
-
-    // Typing path (agent gave no email): enable Continue once valid
-    input?.addEventListener("input", () => {
-      const el = document.getElementById("login-email-submit");
-      if (el) el.disabled = !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.value.trim());
-    });
-    input?.addEventListener("keydown", function onKey(e) {
-      if (e.key === "Enter") { input.removeEventListener("keydown", onKey); resolveWith(); }
-    });
-
-    document.getElementById("login-email-submit").addEventListener("click", resolveWith, { once: true });
-    document.getElementById("login-email-cancel").addEventListener("click", () => {
-      cleanup();
-      resolvePromise({ cancelled: true, reason: "User cancelled login" });
-    }, { once: true });
-  });
-}
-
-// Status strip shown in the login view while the OOB challenge is pending.
-function setLoginToolStatus(msg) {
-  const el = document.getElementById("login-tool-status");
-  if (el) el.textContent = msg ?? "";
-}
-
-async function loginToolHandler(args, executeOptions) {
-  const abortSignal = executeOptions?.signal ?? null;
-  const requestedEmail = typeof args?.email === "string" ? args.email.trim() : "";
-
-  // The agent collects the email in chat and passes it here. If it didn't,
-  // the modal offers a typing fallback (rare path — agents should ask).
-  const confirmed = await showLoginEmailModal({ suggestedEmail: requestedEmail });
-  if (confirmed.cancelled) return confirmed;
+  // Email is a required parameter — the agent asks in chat. Reject a
+  // malformed value with a readable message the agent can retry against.
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return {
+      error: "A valid email parameter is required. Ask the user for their account email address, then call this tool again with it.",
+      code: "EMAIL_REQUIRED",
+    };
+  }
 
   // agentic: true → authorize against the dedicated agentic client when
   // configured, so the session's access_token carries that client_id as the
   // agent-initiated signal (surfaced to P1AZ as WebMCP.Request.clientId).
-  const { authorizeUrl, state, clientId } = await createLoginSession({
-    loginHint: confirmed.email,
+  const { authorizeUrl, clientId } = await createLoginSession({
+    loginHint: email,
     agentic: true,
   });
 
   const usingAgenticClient = clientId !== CONFIG.PINGONE_CLIENT_ID;
 
-  setLoginToolStatus(`Opening sign-in for ${confirmed.email}… complete the verification to continue.`);
   logToolEvent(
-    `[login] authorize request opened for ${confirmed.email}` +
+    `[login] navigating tab to OIDC authorize for ${email}` +
     (usingAgenticClient ? ` — agentic client ${clientId} (OOB flow via its sign-on policy)` : "")
   );
 
-  // Popup needs a user gesture — the modal's submit click provides it.
-  const popup = window.open(authorizeUrl, "webmcp_login", "width=460,height=720");
+  // Full-page redirect. The tab goes to PingOne; the DaVinci OOB HILT flow
+  // runs; PingOne returns to this app with ?code= and handleCallback()
+  // completes sign-in. This frame unloads here — execution simply ends.
+  window.location.href = authorizeUrl;
 
-  if (!popup) {
-    setLoginToolStatus("");
-    return { error: "The sign-in window was blocked by the browser. Please allow popups for this site and try again." };
-  }
-
-  const relay = await pollForLoginRelay({ signal: abortSignal, popup });
-
-  if (relay.cancelled) { setLoginToolStatus(""); return relay; }
-  if (relay.error)     { setLoginToolStatus(relay.error); return relay; }
-
-  if (relay.state !== state) {
-    setLoginToolStatus("");
-    return { error: "State mismatch in login relay — possible CSRF. Login aborted." };
-  }
-
-  setLoginToolStatus("Completing sign-in…");
-  logToolEvent("[login] authorization code received — exchanging for tokens");
-
-  try {
-    const tokens = await exchangeCode(relay.code);
-    idTokenRaw = tokens.id_token;
-    idTokenClaims = parseJwt(idTokenRaw);
-
-    sessionStorage.setItem("id_token", idTokenRaw);
-    sessionStorage.setItem("access_token", tokens.access_token || "");
-
-    setLoginToolStatus("");
-    await mountApp();
-    logToolEvent(`[login] session established for ${idTokenClaims?.name ?? confirmed.email}`);
-
-    return {
-      success: true,
-      user: {
-        name:  idTokenClaims?.name ?? idTokenClaims?.preferred_username ?? null,
-        email: idTokenClaims?.email ?? confirmed.email,
-      },
-      session: {
-        // The client_id the session's access_token carries — a dedicated
-        // agentic client here is the "session is agent-initiated" signal.
-        client_id:    clientId,
-        agentic:      usingAgenticClient,
-        // Surfaced to PingOne Authorize on every tool API call, where policy
-        // can condition on it (e.g. force step-up for agent checkouts).
-        az_parameter: "WebMCP.Request.clientId",
-      },
-      note: "User completed out-of-band verification. The storefront is now signed in and all other tools are usable." +
-        (usingAgenticClient ? " This session is marked as agent-initiated (dedicated agentic client)." : ""),
-    };
-  } catch (err) {
-    const message = err?.message || String(err);
-    logToolEvent(`[login] token exchange failed: ${message}`, "error");
-    setLoginToolStatus(`Sign-in failed: ${message}`);
-    return { error: `Token exchange failed: ${message}` };
-  }
+  // Unreachable in a real browser (navigation unloads the frame), but a
+  // host that snapshots the return value (or blocks navigation) gets a
+  // coherent answer.
+  return {
+    success: true,
+    redirecting: true,
+    detail:
+      "The tab is navigating to the PingOne sign-in. The user completes out-of-band " +
+      "verification (e.g. approves on their phone); when the app reloads it will be " +
+      "signed in and the store tools will be available.",
+    user: { email },
+    session: {
+      client_id: clientId,
+      agentic: usingAgenticClient,
+      az_parameter: "WebMCP.Request.clientId",
+    },
+  };
 }
 
 // ============================================================
@@ -935,12 +750,12 @@ function requireSession() {
   };
 }
 
-// Tool: login — agent-initiated sign-in via OIDC popup + DaVinci OOB HILT.
+// Tool: login — agent-initiated sign-in via in-tab OIDC redirect + DaVinci OOB HILT.
 // Registered at boot; unregistered in mountApp() once a session exists
 // (signing in again is a button action at that point).
 const LOGIN_TOOL_DESCRIPTOR = {
   title: "Login",
-  description: "Signs the user in via PingOne. Ask the user for their account email address in chat first, then pass it as the email parameter — the user confirms it on one click and completes out-of-band verification in the opened sign-in window (e.g. approving on their phone). This tool polls until sign-in completes. Only usable when signed out.",
+  description: "Signs the user in via PingOne. Ask the user for their account email address in chat first, then pass it as the email parameter. The tab navigates to the PingOne sign-in, the user completes out-of-band verification there (e.g. approving on their phone), and the app reloads signed in — the store tools then become available. Only usable when signed out.",
   parameters: {
     type: "object",
     properties: {
@@ -949,8 +764,8 @@ const LOGIN_TOOL_DESCRIPTOR = {
     required: ["email"],
   },
   ui: {
-    labels: [{text:"OIDC", cls:"tool-label-api"}, {text:"OOB", cls:"tool-label-auth"}, {text:"POLL", cls:"tool-label-mutate"}],
-    desc: "Opens the PingOne authorize request in a popup, runs the DaVinci OOB HILT flow, polls for the returned code, then exchanges it for tokens.",
+    labels: [{text:"OIDC", cls:"tool-label-api"}, {text:"OOB", cls:"tool-label-auth"}, {text:"REDIRECT", cls:"tool-label-mutate"}],
+    desc: "Navigates the tab to the PingOne authorize request, runs the DaVinci OOB HILT flow; the app returns signed in via the OIDC callback.",
     inputs: false,
   },
 };
@@ -1854,22 +1669,6 @@ async function handleCallback() {
   }
 
   if (!code) return false; // not a callback
-
-  // ── Popup relay mode ─────────────────────────────────────────
-  // This window was opened by the login tool. Hand the code back to the
-  // opener (postMessage to same-origin opener + localStorage stash) and
-  // close immediately. The opener owns state validation and the exchange.
-  if (window.opener && window.opener !== window) {
-    try {
-      const relay = { type: "webmcp_login_relay", code, state, error };
-      window.opener.postMessage(relay, window.location.origin);
-      try { localStorage.setItem(LOGIN_RELAY_KEY, JSON.stringify(relay)); } catch { /* private mode */ }
-      setTimeout(() => window.close(), 150);
-      // Show nothing while closing — the opener drives all UX.
-      document.body.textContent = "Sign-in complete — you can close this window.";
-      return true;
-    } catch { /* fall through to normal callback handling */ }
-  }
 
   // Validate state
   const storedState = sessionStorage.getItem("oauth_state");
