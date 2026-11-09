@@ -246,6 +246,7 @@ async function startLogin() {
 
   sessionStorage.setItem("pkce_verifier", verifier);
   sessionStorage.setItem("oauth_state", randomBase64url(16));
+  sessionStorage.setItem("oauth_client_id", CONFIG.PINGONE_CLIENT_ID);
 
   const params = new URLSearchParams({
     response_type: "code",
@@ -310,6 +311,11 @@ async function createLoginSession({ loginHint, agentic = false } = {}) {
     ? CONFIG.PINGONE_AGENTIC_CLIENT_ID
     : CONFIG.PINGONE_CLIENT_ID;
 
+  // Remember which client the code will be bound to — the exchange must
+  // present the same client_id the authorize request used, or the AS
+  // rejects it with invalid_grant.
+  sessionStorage.setItem("oauth_client_id", clientId);
+
   const authorizeUrl = await buildAuthorizeUrl({
     loginHint, verifier, state, nonce, clientId,
   });
@@ -328,6 +334,7 @@ async function startSilentLogin() {
 
   sessionStorage.setItem("pkce_verifier", verifier);
   sessionStorage.setItem("oauth_state", randomBase64url(16));
+  sessionStorage.setItem("oauth_client_id", CONFIG.PINGONE_CLIENT_ID);
   sessionStorage.setItem("silent_refresh", "1");
 
   const params = new URLSearchParams({
@@ -345,16 +352,22 @@ async function startSilentLogin() {
   window.location.href = `${CONFIG.PINGONE_AS_BASE}/authorize?${params}`;
 }
 
-// Exchange auth code for tokens
+// Exchange auth code for tokens.
+// The client_id must match the one the authorize request used — the AS binds
+// the code to that client and rejects a mismatch with invalid_grant. It was
+// stashed at authorize time (oauth_client_id); fall back to the main client
+// for pre-existing sessions.
 async function exchangeCode(code) {
   const verifier = sessionStorage.getItem("pkce_verifier");
   if (!verifier) throw new Error("No PKCE verifier in session");
+
+  const clientId = sessionStorage.getItem("oauth_client_id") || CONFIG.PINGONE_CLIENT_ID;
 
   const body = new URLSearchParams({
     grant_type: "authorization_code",
     code,
     redirect_uri: CONFIG.PINGONE_REDIRECT_URI,
-    client_id: CONFIG.PINGONE_CLIENT_ID,
+    client_id: clientId,
     code_verifier: verifier,
   });
 
