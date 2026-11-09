@@ -970,9 +970,6 @@ async function checkoutPost(requestBody) {
     return apiResponse;
 }
 
-// Pending PingOne Verify transaction for check_checkout_verification (agent path).
-let pendingVerifyTransaction = null;
-
 // ── Agent path ─────────────────────────────────────────────────────────
 // Stateless tool calls with the agent mediating the human loop. In CUA mode
 // the interface between tab and human is the agent chat, not the browser —
@@ -1002,64 +999,35 @@ function checkoutHandlerAgent(args) {
 
       const apiResponse = await checkoutPost(requestBody);
 
-      // ── P1AZ interactive DENY → return as challenge for agent mediation ──
+      // ── P1AZ interactive DENY → OOB HILT step-up (same path as login) ──
+      // Any interactive deny navigates the tab to the OOB flow — the same
+      // agentic-client authorize the login tool uses. The DaVinci flow owns
+      // WHAT verification runs (Verify push, OTP, anything); the page only
+      // stashes the cart and returns a challenge the agent can act on.
+      // After the human approves out-of-band, the app returns signed in
+      // (fresh auth_time) and the agent re-calls checkout.
       if (apiResponse?.denied && apiResponse.statements?.length) {
-        for (const stmt of apiResponse.statements) {
-          // Payload normally arrives pre-parsed from our server, but accept
-          // raw JSON strings too (direct PingOne-shaped responses).
-          let p = stmt.payload ?? {};
-          if (typeof p === "string") {
-            try { p = JSON.parse(p); } catch { /* leave as string */ }
-          }
+        const statementCodes = apiResponse.statements.map(s => s.code).join(", ");
+        logToolEvent(`[checkout] P1AZ: interactive deny (${statementCodes}) — OOB HILT step-up`, "info");
 
-          if (stmt.code === "deny-stepup") {
-            logToolEvent(`[checkout] P1AZ: deny-stepup — returning challenge to agent`, "info");
-            // Stash challenge context for verify_checkout_otp
-            pendingVerifyTransaction = {
-              deviceAuthenticationId: p.deviceAuthenticationId,
-              requestBody,
-            };
-            registerAgentVerifyTools();
-            return {
-              challenge: "MFA_REQUIRED",
-              detail: p.message ?? "Step-up with MFA required. Ask the user for the one-time code sent to their email, then call verify_checkout_otp with it.",
-              deviceAuthenticationId: p.deviceAuthenticationId ?? null,
-              // Context for the verification call
-              pending_order: { order_id: order.order_id, total: order.total },
-            };
-          }
+        // Persist the cart so it survives the redirect round-trip.
+        sessionStorage.setItem("pending_cart", JSON.stringify(cart));
 
-          if (stmt.code === "deny-verify") {
-            logToolEvent(`[checkout] P1AZ: deny-verify — returning challenge to agent`, "info");
-            if (!p.verifyTransactionId || !p.qrUrl) {
-              const message = "deny-verify statement is missing verifyTransactionId or qrUrl.";
-              showOrderDenied(message);
-              throw new Error(message);
-            }
-            // Stash the pending transaction so check_checkout_verification can poll it
-            pendingVerifyTransaction = {
-              verifyTransactionId: p.verifyTransactionId,
-              requestBody: { ...requestBody, verifyTransactionId: p.verifyTransactionId },
-            };
-            registerAgentVerifyTools();
-            return {
-              challenge: "VERIFY_TRANSACTION",
-              detail: p.message ?? "PingOne Verify transaction started. The QR code is displayed on the page — ask the user to scan it and approve, then call check_checkout_verification.",
-              verify_transaction_id: p.verifyTransactionId,
-              qr_url: p.qrUrl,
-              web_verification_code: p.webVerificationCode ?? null,
-              pending_order: { order_id: order.order_id, total: order.total },
-            };
-          }
+        // Drop the pending-order id: the retry generates a fresh one, and
+        // the server treats the second pass as a new request that now
+        // carries a fresh auth_time from the OOB-verified session.
+        sessionStorage.setItem("checkout_retry", "1");
 
-          logToolEvent(`[checkout] P1AZ: unhandled statement code "${stmt.code}" — no handler registered`, "warn");
-        }
-
-        // All statements were unrecognised
-        const codes = apiResponse.statements.map(s => s.code).join(", ");
-        const message = `Checkout denied — unhandled statement code(s): ${codes}`;
-        showOrderDenied(message);
-        throw new Error(message);
+        return {
+          challenge: "STEP_UP_REQUIRED",
+          detail:
+            "The checkout requires step-up verification. The tab is navigating to the PingOne " +
+            "sign-in flow — the user completes verification out-of-band (e.g. approves on their " +
+            "phone). When the app reloads, the cart is restored: call checkout again to place " +
+            "the order.",
+          statements: statementCodes,
+          pending_order: { total: order.total, item_count: order.items.reduce((n, i) => n + i.quantity, 0) },
+        };
       }
 
       // Permitted first pass — order placed.
@@ -1197,124 +1165,6 @@ async function checkoutHandlerHuman(args, executeOptions) {
     return finalResult;
 }
 
-// ── Agent-path verification tools ──────────────────────────────────────
-// Registered on demand when the agent path returns a challenge; unregistered
-// once verification completes, fails, or the cart empties. The agent mediates
-// the human loop: it asks in chat, then completes the flow with these calls.
-
-// verify_checkout_otp — completes an MFA_REQUIRED challenge (deny-stepup).
-const VERIFY_OTP_DESCRIPTOR = {
-  title: "Verify Checkout OTP",
-  description: "Completes checkout after an MFA_REQUIRED challenge. Pass the one-time code the user received by email (ask the user for it in chat).",
-  parameters: {
-    type: "object",
-    properties: {
-      otpCode: { type: "string", description: "The one-time code the user received (4-8 digits) — ask the user for it in chat." },
-    },
-    required: ["otpCode"],
-  },
-  annotations: { consequentialHint: true },
-  ui: {
-    labels: [{text:"MFA", cls:"tool-label-auth"}, {text:"API", cls:"tool-label-api"}],
-    desc: "Re-POSTs the pending checkout with the user's OTP for PingOne MFA verification.",
-  },
-};
-
-function verifyCheckoutOtpHandler(args) {
-  const otpCode = typeof args?.otpCode === "string" ? args.otpCode.trim() : "";
-  if (!/^\d{4,8}$/.test(otpCode)) {
-    return {
-      error: "A valid otpCode (4-8 digits) is required. Ask the user for the one-time code sent to their email, then call again.",
-      code: "OTP_REQUIRED",
-    };
-  }
-
-  return (async () => {
-    if (!pendingVerifyTransaction) {
-      return { error: "No pending MFA challenge. Call checkout first — an MFA_REQUIRED challenge registers the verification context." };
-    }
-
-    // Re-POST the stashed first-pass body + the user's OTP.
-    const requestBody = {
-      ...pendingVerifyTransaction.requestBody,
-      otpCode,
-      ...(pendingVerifyTransaction.deviceAuthenticationId && {
-        deviceAuthenticationId: pendingVerifyTransaction.deviceAuthenticationId,
-      }),
-    };
-
-    const apiResponse = await checkoutPost(requestBody);
-
-    if (apiResponse?.denied) {
-      return { error: "OTP verification failed — the code was rejected. Confirm the code with the user and retry.", challenge: apiResponse };
-    }
-
-    const finalResult = apiResponse ?? { success: true, source: "demo-simulated", order: cartSummary() };
-    showOrderSuccess(finalResult.order ?? cartSummary());
-    cart = {};
-    renderCart();
-    unregisterAgentVerifyTools();
-    pendingVerifyTransaction = null;
-    return finalResult;
-  })();
-}
-
-// check_checkout_verification — polls a VERIFY_TRANSACTION challenge to completion.
-const CHECK_VERIFICATION_DESCRIPTOR = {
-  title: "Check Checkout Verification",
-  description: "Checks whether the user has approved the pending PingOne Verify transaction (QR scan). Poll this tool — e.g. every 10 seconds — until it returns success or an error.",
-  parameters: {},
-  ui: {
-    labels: [{text:"VERIFY", cls:"tool-label-auth"}, {text:"POLL", cls:"tool-label-mutate"}],
-    desc: "Polls the pending PingOne Verify transaction; returns the order once approved.",
-  },
-};
-
-function checkCheckoutVerificationHandler() {
-  if (!pendingVerifyTransaction) {
-    return { error: "No pending verification transaction. Call checkout first — a VERIFY_TRANSACTION challenge registers the polling context." };
-  }
-
-  return (async () => {
-    const resp = await apiRequest("POST", "/checkout", {
-      body: pendingVerifyTransaction.requestBody,
-      requiresAuth: true,
-    });
-
-    if (resp?.success && resp?.order) {
-      showOrderSuccess(resp.order);
-      cart = {};
-      renderCart();
-      unregisterAgentVerifyTools();
-      pendingVerifyTransaction = null;
-      return { success: true, order: resp.order, note: "User approved the transaction in PingOne Verify." };
-    }
-
-    // Still pending — keep polling
-    return { pending: true, detail: "Verification not yet approved. Poll again (e.g. in 10 seconds)." };
-  })();
-}
-
-function unregisterAgentVerifyTools() {
-  for (const name of ["verify_checkout_otp", "check_checkout_verification"]) {
-    if (toolRegistry[name]) unregisterTool(name);
-  }
-}
-
-function registerAgentVerifyTools() {
-  let changed = false;
-  if (!toolRegistry["verify_checkout_otp"]) {
-    registerTool("verify_checkout_otp", VERIFY_OTP_DESCRIPTOR, verifyCheckoutOtpHandler);
-    logToolEvent("[tools] verify_checkout_otp registered — MFA challenge pending");
-    changed = true;
-  }
-  if (!toolRegistry["check_checkout_verification"]) {
-    registerTool("check_checkout_verification", CHECK_VERIFICATION_DESCRIPTOR, checkCheckoutVerificationHandler);
-    logToolEvent("[tools] check_checkout_verification registered — Verify transaction pending");
-    changed = true;
-  }
-  if (changed && typeof notifyToolsUpdate === "function") notifyToolsUpdate();
-}
 
 // ============================================================
 // Cart helpers
@@ -1381,12 +1231,6 @@ function syncCartTools() {
       logToolEvent(`[tools] ${name} unregistered — cart is empty`);
       changed = true;
     }
-  }
-
-  // Cart emptied — drop any pending verification context too.
-  if (!hasItems) {
-    pendingVerifyTransaction = null;
-    unregisterAgentVerifyTools();
   }
 
   if (changed) {
@@ -1991,11 +1835,29 @@ async function mountApp() {
   // Session is active — the store tools become available.
   registerStoreTools();
 
+  // Restore a cart stashed by an OOB step-up round-trip (checkout agent
+  // path). The user verified out-of-band; the agent re-calls checkout with
+  // the fresh auth_time. Cleared once restored.
+  const stashedCart = sessionStorage.getItem("pending_cart");
+  const isRetry = sessionStorage.getItem("checkout_retry") === "1";
+  if (stashedCart) {
+    try {
+      cart = JSON.parse(stashedCart) ?? {};
+      logToolEvent(`[checkout] cart restored after OOB step-up — ${Object.keys(cart).length} product(s); retry checkout now`);
+    } catch { /* corrupt stash — ignore */ }
+    sessionStorage.removeItem("pending_cart");
+    sessionStorage.removeItem("checkout_retry");
+  }
+
   // Use the tool to load products — same code path as an agent call.
   // This means the API fetch, logging, and error handling are unified
   // whether the caller is the webapp itself or an MCP agent.
   await invokeTool("view_products");
   renderCart();
+
+  if (isRetry) {
+    logToolEvent("[checkout] session re-established after step-up — agent can re-call checkout (fresh auth_time)");
+  }
 
   const name = idTokenClaims?.name || idTokenClaims?.preferred_username || idTokenClaims?.email || idTokenClaims?.sub || "User";
   document.getElementById("nav-username").textContent = name;

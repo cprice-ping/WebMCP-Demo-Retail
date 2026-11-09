@@ -58,7 +58,7 @@ Browser
 | `add_to_cart` | Mutation | Session | Takes `product_id` + `quantity`; updates in-memory `cart{}` |
 | `view_cart` | Read | Session | `readOnlyHint: true`; returns cart contents + total as JSON |
 | `remove_from_cart` | Mutation | Session | Takes `product_id`; removes it entirely from `cart{}` |
-| `checkout` | Host prompt → `POST /api/checkout` | Session + Bearer | The host prompts the user before the tool runs (`consequentialHint`) — extension permission card, browser chrome, or agent chat. POSTs to the server, which validates the AT and calls PingOne Authorize: PERMIT → order placed; step-up challenge → returned as a tool result for agent mediation (`MFA_REQUIRED` → agent asks for the OTP → `verify_checkout_otp`; `VERIFY_TRANSACTION` → user approves in the Verify app → `check_checkout_verification`). Human-in-tab paths (button, console) use the in-page modals instead. |
+| `checkout` | Host prompt → `POST /api/checkout` | Session + Bearer | The host prompts the user before the tool runs (`consequentialHint`) — extension permission card, browser chrome, or agent chat. POSTs to the server, which validates the AT and calls PingOne Authorize: PERMIT → order placed; interactive deny → the tab navigates to the OOB HILT flow (same mechanism as the login tool — the DaVinci flow decides what verification runs), the cart is stashed and restored on return, and the agent re-calls checkout with the fresh session. Human-in-tab paths (button, console) use the in-page modals instead. |
 
 ### Session Guard
 
