@@ -318,18 +318,22 @@ async function exchangeCode(code) {
 
 // ============================================================
 // WebMCP tool registration
-// navigator.modelContext polyfill for browsers that don't yet
-// implement the spec — tools are still callable via the UI.
+// Per the current spec (webmachinelearning.github.io/webmcp), the API
+// entry point is document.modelContext. A shim is installed for browsers
+// that don't implement it yet — tools remain callable via the UI.
 // ============================================================
 
 const toolRegistry = {};
 const nativeRegisteredTools = new Set();
 const nativeRegistrationFailures = new Map();
+// Per spec there is no unregisterTool(): a tool is unregistered by
+// aborting the AbortSignal passed to registerTool(tool, { signal }).
+const nativeToolSignals = new Map(); // tool name -> AbortController
 
 function ensureModelContextShim() {
-  if (typeof navigator === "undefined") return null;
+  if (typeof document === "undefined") return null;
 
-  if (!navigator.modelContext) {
+  if (!document.modelContext) {
     const shim = {
       __shopMcpShim: true,
       async registerTool(name, descriptor, handler) {
@@ -352,46 +356,42 @@ function ensureModelContextShim() {
       },
     };
 
-    navigator.modelContext = shim;
+    document.modelContext = shim;
   }
 
-  return navigator.modelContext;
+  return document.modelContext;
 }
 
 function registerToolsWithNativeModelContext() {
-  if (typeof navigator === "undefined" || !navigator.modelContext?.registerTool) return;
-  if (navigator.modelContext.__shopMcpShim) return;
+  if (typeof document === "undefined" || !document.modelContext?.registerTool) return;
+  if (document.modelContext.__shopMcpShim) return;
 
   Object.entries(toolRegistry).forEach(([name, value]) => {
     if (nativeRegisteredTools.has(name)) return;
 
     const inputSchema = value.descriptor?.parameters || { type: "object", properties: {} };
     const annotations = value.descriptor?.annotations;
+
+    // Primary: current spec form — document.modelContext.registerTool(tool, { signal })
+    // returning a promise. Annotations are booleans per ToolAnnotations.
     const candidates = [
-      // Primary: W3C WebMCP spec form — single object, 'execute' key, optional annotations
-      () => navigator.modelContext.registerTool({
+      (controller) => document.modelContext.registerTool({
         name,
+        ...(value.descriptor?.title && { title: value.descriptor.title }),
+        description: value.descriptor?.description || "",
+        inputSchema,
+        execute: value.handler,
+        ...(annotations && { annotations }),
+      }, { signal: controller.signal }),
+      // Fallback: single-object form without options (early Chrome preview)
+      () => document.modelContext.registerTool({
+        name,
+        ...(value.descriptor?.title && { title: value.descriptor.title }),
         description: value.descriptor?.description || "",
         inputSchema,
         execute: value.handler,
         ...(annotations && { annotations }),
       }),
-      // Fallback: 'handler' key (accepted by some extension versions)
-      () => navigator.modelContext.registerTool({
-        name,
-        description: value.descriptor?.description || "",
-        inputSchema,
-        handler: value.handler,
-      }),
-      // Fallback: 'parameters' instead of 'inputSchema'
-      () => navigator.modelContext.registerTool({
-        name,
-        description: value.descriptor?.description || "",
-        parameters: inputSchema,
-        execute: value.handler,
-      }),
-      // Fallback: old 3-argument form
-      () => navigator.modelContext.registerTool(name, value.descriptor, value.handler),
     ];
 
     let registered = false;
@@ -400,7 +400,20 @@ function registerToolsWithNativeModelContext() {
     try {
       for (const attempt of candidates) {
         try {
-          attempt();
+          // Spec: registerTool(tool, { signal }) — aborting the signal
+          // unregisters the tool. Keep the controller for unregisterTool().
+          const controller = new AbortController();
+          const maybePromise = attempt(controller);
+          // registerTool returns a promise per spec; a rejection here
+          // (duplicate name, policy block) is not a sync throw.
+          if (maybePromise?.catch) {
+            maybePromise.catch(err => {
+              logToolEvent(`registerTool("${name}") rejected: ${err?.message ?? err}`, "warn");
+              nativeRegisteredTools.delete(name);
+              nativeToolSignals.delete(name);
+            });
+          }
+          nativeToolSignals.set(name, controller);
           registered = true;
           break;
         } catch (e) {
@@ -411,21 +424,21 @@ function registerToolsWithNativeModelContext() {
       if (registered) {
         nativeRegisteredTools.add(name);
         nativeRegistrationFailures.delete(name);
-        logToolEvent(`Registered tool "${name}" via navigator.modelContext`);
+        logToolEvent(`Registered tool "${name}" via document.modelContext`);
         return;
       }
 
       const prev = nativeRegistrationFailures.get(name);
       if (prev !== lastErrorMessage) {
         nativeRegistrationFailures.set(name, lastErrorMessage);
-        logToolEvent(`navigator.modelContext.registerTool unavailable: ${lastErrorMessage}`, "warn");
+        logToolEvent(`document.modelContext.registerTool unavailable: ${lastErrorMessage}`, "warn");
       }
     } catch (e) {
       const msg = e?.message || String(e);
       const prev = nativeRegistrationFailures.get(name);
       if (prev !== msg) {
         nativeRegistrationFailures.set(name, msg);
-        logToolEvent(`navigator.modelContext.registerTool unavailable: ${msg}`, "warn");
+        logToolEvent(`document.modelContext.registerTool unavailable: ${msg}`, "warn");
       }
     }
   });
@@ -446,8 +459,16 @@ function registerTool(name, descriptor, handler) {
 function unregisterTool(name) {
   delete toolRegistry[name];
   nativeRegisteredTools.delete(name);
-  if (navigator.modelContext && !navigator.modelContext.__shopMcpShim) {
-    try { navigator.modelContext.unregisterTool?.(name); } catch (_) { /* ignore */ }
+
+  // Spec mechanism: abort the AbortSignal given at registration time.
+  const controller = nativeToolSignals.get(name);
+  if (controller) {
+    try { controller.abort(); } catch (_) { /* already aborted */ }
+    nativeToolSignals.delete(name);
+  }
+
+  if (document.modelContext && !document.modelContext.__shopMcpShim) {
+    try { document.modelContext.unregisterTool?.(name); } catch (_) { /* older impls */ }
   }
 }
 
@@ -614,9 +635,10 @@ function requireSession() {
 registerTool(
   "view_products",
   {
+    title: "View Products",
     description: "Fetches the product catalog from the backend API. Requires an active user session.",
     parameters: {},
-    annotations: { readOnlyHint: "true" },
+    annotations: { readOnlyHint: true },
     ui: {
       labels: [{text:"GET"}, {text:"API", cls:"tool-label-api"}],
       desc: "GET <code>/api/products.json</code> — fetches catalog from the backend.",
@@ -639,6 +661,7 @@ registerTool(
 registerTool(
   "add_to_cart",
   {
+    title: "Add to Cart",
     description: "Adds a product to the shopping cart by product ID and quantity.",
     parameters: {
       type: "object",
@@ -676,9 +699,10 @@ registerTool(
 registerTool(
   "view_cart",
   {
+    title: "View Cart",
     description: "Returns the current cart contents and total as JSON. Requires an active user session.",
     parameters: {},
-    annotations: { readOnlyHint: "true" },
+    annotations: { readOnlyHint: true },
     ui: {
       labels: [{text:"GET"}],
       desc: "Returns current cart items, item count, and total as JSON.",
@@ -696,6 +720,7 @@ registerTool(
 
 // Tool: remove_from_cart — registered dynamically via syncCartTools() when cart has items
 const REMOVE_FROM_CART_DESCRIPTOR = {
+  title: "Remove from Cart",
   description: "Removes a product entirely from the cart by product ID.",
   parameters: {
     type: "object",
@@ -724,15 +749,17 @@ async function removeFromCartHandler({ product_id }) {
 
 // Tool: checkout — registered dynamically via syncCartTools() when cart has items
 const CHECKOUT_DESCRIPTOR = {
-    description: "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. Requires an active user session and user confirmation via elicitation before the request is sent. Returns an error if the user is not signed in or the cart is empty.",
+    title: "Checkout",
+    description: "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. Requires an active user session. Places a real order — the in-page confirmation modal must be approved by the user before the request is sent. Returns an error if the user is not signed in or the cart is empty.",
     parameters: {},
+    annotations: { consequentialHint: true },
     ui: {
-      labels: [{text:"ELICIT", cls:"tool-label-confirm"}, {text:"API", cls:"tool-label-api"}, {text:"BEARER", cls:"tool-label-auth"}],
-      desc: "POST <code>/api/checkout</code> — elicits confirmation, then calls the API with <code>Authorization: Bearer &lt;access_token&gt;</code>.",
+      labels: [{text:"CONFIRM", cls:"tool-label-confirm"}, {text:"API", cls:"tool-label-api"}, {text:"BEARER", cls:"tool-label-auth"}],
+      desc: "POST <code>/api/checkout</code> — shows an in-page confirmation modal, then calls the API with <code>Authorization: Bearer &lt;access_token&gt;</code>.",
     },
 };
 
-async function checkoutHandler(args, client) {
+async function checkoutHandler(args, executeOptions) {
     const sessionError = requireSession();
     if (sessionError) return sessionError;
 
@@ -740,17 +767,21 @@ async function checkoutHandler(args, client) {
       return { error: "Cart is empty. Add items before checkout." };
     }
 
+    // Spec ToolExecuteCallbackOptions carries { signal }: the agent cancelling
+    // the in-flight tool call. Propagate it into the confirmation modal so an
+    // aborted checkout closes the modal instead of leaving it open.
+    const abortSignal = executeOptions?.signal ?? null;
+
     // Kick off Protect signals collection immediately — runs in parallel
     // with the confirmation modal so getData() is ready (or timed out)
     // by the time the user clicks Confirm. No await yet.
     const signalsPromise = getProtectSignals();
 
-    // Elicitation: surface confirmation modal via client.requestUserInteraction
-    // This is the spec-defined channel for a tool to pause and await human input.
-    // client is a ModelContextClient (native) or mockClient (UI calls).
-    const userDecision = await (client?.requestUserInteraction
-      ? client.requestUserInteraction(() => new Promise((resolve) => showCheckoutModal(resolve)))
-      : new Promise((resolve) => showCheckoutModal(resolve)));
+    // In-page confirmation modal. The current WebMCP spec has no
+    // tool-initiated elicitation API — agents enforce user confirmation
+    // themselves via the consequentialHint annotation. The page still owns
+    // the human checkpoint: the modal must be approved before the POST.
+    const userDecision = await showCheckoutModal(abortSignal);
 
     if (userDecision.cancelled) return userDecision;
 
@@ -789,11 +820,9 @@ async function checkoutHandler(args, client) {
 
         // ── deny-stepup: MFA/OTP required ──────────────────────────
         if (stmt.code === "deny-stepup") {
-          logToolEvent(`[checkout] P1AZ: deny-stepup — eliciting OTP via WebMCP Elicitation`, "info");
+          logToolEvent(`[checkout] P1AZ: deny-stepup — showing OTP modal`, "info");
 
-          const otpResult = await (client?.requestUserInteraction
-            ? client.requestUserInteraction(() => new Promise(resolve => showOtpModal(p.message, resolve)))
-            : new Promise(resolve => showOtpModal(p.message, resolve)));
+          const otpResult = await showOtpModal(p.message);
 
           if (otpResult.cancelled) return otpResult;
 
@@ -821,17 +850,11 @@ async function checkoutHandler(args, client) {
             throw new Error(message);
           }
 
-          const verifyResult = await (client?.requestUserInteraction
-            ? client.requestUserInteraction(() => runVerifyChallenge({
-                hint: p.message, qrUrl: p.qrUrl,
-                webVerificationCode: p.webVerificationCode,
-                requestBody: { ...requestBody, verifyTransactionId: p.verifyTransactionId },
-              }))
-            : runVerifyChallenge({
-                hint: p.message, qrUrl: p.qrUrl,
-                webVerificationCode: p.webVerificationCode,
-                requestBody: { ...requestBody, verifyTransactionId: p.verifyTransactionId },
-              }));
+          const verifyResult = await runVerifyChallenge({
+            hint: p.message, qrUrl: p.qrUrl,
+            webVerificationCode: p.webVerificationCode,
+            requestBody: { ...requestBody, verifyTransactionId: p.verifyTransactionId },
+          });
 
           if (verifyResult.cancelled) return verifyResult;
           if (verifyResult.error) { showOrderDenied(verifyResult.error); throw new Error(verifyResult.error); }
@@ -1036,43 +1059,66 @@ function renderCart() {
 }
 
 // ============================================================
-// Checkout modal (elicitation)
+// Checkout modal (in-page confirmation)
 // ============================================================
 
-function showCheckoutModal(resolvePromise) {
-  const modal = document.getElementById("modal-checkout");
-  const summary = cartSummary();
-  const summaryEl = document.getElementById("modal-summary");
+// Promise-based: resolves when the user confirms or cancels. An optional
+// AbortSignal (the spec's ToolExecuteCallbackOptions.signal) resolves the
+// promise as cancelled when the agent aborts the in-flight tool call.
+// The WebMCP spec removed the elicitation API — confirmation is a page
+// concern now, and agents enforce their own prompt via consequentialHint.
+function showCheckoutModal(abortSignal = null) {
+  return new Promise((resolvePromise) => {
+    const modal = document.getElementById("modal-checkout");
+    const summary = cartSummary();
+    const summaryEl = document.getElementById("modal-summary");
 
-  const lines = summary.items.map(i =>
-    `${i.quantity}× ${i.name} — $${i.line_total.toFixed(2)}`
-  ).join("\n");
+    const lines = summary.items.map(i =>
+      `${i.quantity}× ${i.name} — $${i.line_total.toFixed(2)}`
+    ).join("\n");
 
-  summaryEl.textContent = `${lines}\n\nTotal: $${summary.total.toFixed(2)}`;
-  modal.classList.remove("hidden");
+    summaryEl.textContent = `${lines}\n\nTotal: $${summary.total.toFixed(2)}`;
+    modal.classList.remove("hidden");
 
-  const confirm = document.getElementById("modal-confirm");
-  const cancel  = document.getElementById("modal-cancel");
+    const confirm = document.getElementById("modal-confirm");
+    const cancel  = document.getElementById("modal-cancel");
 
-  function cleanup() {
-    modal.classList.add("hidden");
-    confirm.replaceWith(confirm.cloneNode(true));
-    cancel.replaceWith(cancel.cloneNode(true));
-  }
+    let settled = false;
+    function settle(result) {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolvePromise(result);
+    }
 
-  document.getElementById("modal-confirm").addEventListener("click", () => {
-    cleanup();
-    // Do NOT show success here — wait for the API response first.
-    // Success/failure UI is rendered by the checkout tool after the POST returns.
-    const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
-    const result = { order: { ...cartSummary(), order_id: `ORD-${Date.now()}-${rand}` } };
-    resolvePromise(result);
-  }, { once: true });
+    function cleanup() {
+      modal.classList.add("hidden");
+      if (abortSignal) abortSignal.removeEventListener("abort", onAbort);
+      confirm.replaceWith(confirm.cloneNode(true));
+      cancel.replaceWith(cancel.cloneNode(true));
+    }
 
-  document.getElementById("modal-cancel").addEventListener("click", () => {
-    cleanup();
-    resolvePromise({ cancelled: true, reason: "User declined checkout via elicitation" });
-  }, { once: true });
+    function onAbort() {
+      settle({ cancelled: true, reason: "Tool execution cancelled by the agent" });
+    }
+
+    if (abortSignal) {
+      if (abortSignal.aborted) { onAbort(); return; }
+      abortSignal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    document.getElementById("modal-confirm").addEventListener("click", () => {
+      // Do NOT show success here — wait for the API response first.
+      // Success/failure UI is rendered by the checkout tool after the POST returns.
+      const rand = Math.random().toString(36).slice(2, 8).toUpperCase();
+      const result = { order: { ...cartSummary(), order_id: `ORD-${Date.now()}-${rand}` } };
+      settle(result);
+    }, { once: true });
+
+    document.getElementById("modal-cancel").addEventListener("click", () => {
+      settle({ cancelled: true, reason: "User declined checkout" });
+    }, { once: true });
+  });
 }
 
 function showOrderSuccess(order) {
@@ -1092,44 +1138,46 @@ function showOrderDenied(reason) {
   el.classList.remove("hidden");
 }
 
-// OTP elicitation modal
-// Shown when P1AZ returns DENY + MFA_CHALLENGE advice.
-// Collects the one-time code so the checkout tool can re-POST for verification.
-function showOtpModal(hint, resolvePromise) {
-  const modal  = document.getElementById("modal-otp");
-  const hintEl = document.getElementById("otp-hint");
-  const input  = document.getElementById("otp-input");
+// Promise-based OTP modal — resolves when the user submits or cancels.
+// Shown when P1AZ returns DENY + MFA_CHALLENGE advice. Collects the
+// one-time code so the checkout tool can re-POST for verification.
+function showOtpModal(hint) {
+  return new Promise((resolvePromise) => {
+    const modal  = document.getElementById("modal-otp");
+    const hintEl = document.getElementById("otp-hint");
+    const input  = document.getElementById("otp-input");
 
-  if (hintEl) hintEl.textContent = hint ?? "Enter the OTP sent to your registered email.";
-  if (input)  input.value = "";
-  modal.classList.remove("hidden");
-  // Focus after the repaint so the field is visible
-  requestAnimationFrame(() => input?.focus());
+    if (hintEl) hintEl.textContent = hint ?? "Enter the OTP sent to your registered email.";
+    if (input)  input.value = "";
+    modal.classList.remove("hidden");
+    // Focus after the repaint so the field is visible
+    requestAnimationFrame(() => input?.focus());
 
-  const submit = document.getElementById("otp-submit");
-  const cancel = document.getElementById("otp-cancel");
+    const submit = document.getElementById("otp-submit");
+    const cancel = document.getElementById("otp-cancel");
 
-  function cleanup() {
-    modal.classList.add("hidden");
-    document.getElementById("otp-submit").replaceWith(submit.cloneNode(true));
-    document.getElementById("otp-cancel").replaceWith(cancel.cloneNode(true));
-  }
+    function cleanup() {
+      modal.classList.add("hidden");
+      document.getElementById("otp-submit").replaceWith(submit.cloneNode(true));
+      document.getElementById("otp-cancel").replaceWith(cancel.cloneNode(true));
+    }
 
-  function trySubmit() {
-    const code = document.getElementById("otp-input").value.trim();
-    if (!code) return;
-    cleanup();
-    resolvePromise({ otpCode: code });
-  }
+    function trySubmit() {
+      const code = document.getElementById("otp-input").value.trim();
+      if (!code) return;
+      cleanup();
+      resolvePromise({ otpCode: code });
+    }
 
-  document.getElementById("otp-submit").addEventListener("click", trySubmit, { once: true });
-  document.getElementById("otp-cancel").addEventListener("click", () => {
-    cleanup();
-    resolvePromise({ cancelled: true, reason: "User cancelled OTP entry" });
-  }, { once: true });
-  // Also submit on Enter
-  input?.addEventListener("keydown", function onKey(e) {
-    if (e.key === "Enter") { input.removeEventListener("keydown", onKey); trySubmit(); }
+    document.getElementById("otp-submit").addEventListener("click", trySubmit, { once: true });
+    document.getElementById("otp-cancel").addEventListener("click", () => {
+      cleanup();
+      resolvePromise({ cancelled: true, reason: "User cancelled OTP entry" });
+    }, { once: true });
+    // Also submit on Enter
+    input?.addEventListener("keydown", function onKey(e) {
+      if (e.key === "Enter") { input.removeEventListener("keydown", onKey); trySubmit(); }
+    });
   });
 }
 
@@ -1146,7 +1194,7 @@ document.addEventListener("click", (e) => {
 // Tool console (simulate agent calls from UI)
 // ============================================================
 
-const _SRC_CLASS = { "ui": "ui", "custom-agent": "agent", "navigator.modelContext": "mc" };
+const _SRC_CLASS = { "ui": "ui", "custom-agent": "agent", "document.modelContext": "mc" };
 
 function logToolEvent(message, level = "info", source = null) {
   const log = document.getElementById("tool-log");
@@ -1195,24 +1243,25 @@ function sanitizeRequestForLog(rawRequest) {
   return copy;
 }
 
-// Per spec, execute(input, client) receives input directly.
-// UI-triggered calls wrap args in { __shopMcpMeta, arguments } so we
-// can distinguish the two call paths for logging.
+// Per the current spec, execute(inputObject, options) receives the plain
+// input object and returns any JSON-serializable value — the host does the
+// serialization. UI-triggered calls wrap args in { __shopMcpMeta, arguments }
+// so we can distinguish the two call paths for logging.
 function normalizeToolInvocation(rawRequest) {
   const request = rawRequest ?? {};
   const metaSource = request?.__shopMcpMeta?.source;
   const isWrapped = metaSource === "ui" || metaSource === "custom-agent";
-  const source = isWrapped ? metaSource : "navigator.modelContext";
+  const source = isWrapped ? metaSource : "document.modelContext";
   const args = isWrapped ? (request.arguments ?? {}) : request;
   const requestForLog = sanitizeRequestForLog(request);
   return { source, args, requestForLog };
 }
 
-// execute(input, client) — spec-compliant two-arg signature.
-// client is a ModelContextClient (native) or our mockClient (UI calls).
-// Return value is wrapped in { content: [{ type: "text", text }] } per spec.
+// execute(inputObject, options) — spec-compliant signature. options carries
+// { signal } (ToolExecuteCallbackOptions) on native calls. The return value
+// is a plain JSON-serializable object; the host serializes it per spec.
 function createInstrumentedToolHandler(name, handler) {
-  return async (rawRequest = {}, client) => {
+  return async (rawRequest = {}, executeOptions = {}) => {
     const { source, args, requestForLog } = normalizeToolInvocation(rawRequest);
     const started = Date.now();
 
@@ -1229,23 +1278,20 @@ function createInstrumentedToolHandler(name, handler) {
     }
 
     try {
-      const result = await handler(args, client);
+      const result = await handler(args, executeOptions);
       logToolEvent(
         `← [${source}] ${name} response (${Date.now() - started}ms): ${stringifyForLog(result)}`,
         "result", source
       );
-      // Spec-compliant return: { content: [{ type: "text", text: "..." }] }
-      return { content: [{ type: "text", text: JSON.stringify(result) }] };
+      // Spec-compliant return: plain serializable value.
+      return result;
     } catch (err) {
       const message = err?.message || String(err);
       logToolEvent(`← [${source}] ${name} error: ${message}`, "error", source);
-      // Return errors as structured content rather than throwing.
-      // An agent can read and reason about { error } in content;
-      // a raw exception gives it nothing useful to work with.
-      return {
-        content: [{ type: "text", text: JSON.stringify({ error: message }) }],
-        isError: true,
-      };
+      // Return errors as a structured value rather than throwing.
+      // An agent can read and reason about { error } in the result;
+      // a rejection surfaces only as an opaque OperationError.
+      return { error: message };
     }
   };
 }
@@ -1257,16 +1303,12 @@ async function invokeTool(name, args = {}) {
     return;
   }
 
-  // Mock ModelContextClient for UI-triggered calls.
-  // requestUserInteraction invokes the callback immediately (modal is already in-page).
-  const mockClient = {
-    requestUserInteraction: async (callback) => callback(),
-  };
-
+  // UI-triggered calls pass a plain second argument — the in-page modals
+  // handle all user interaction directly, no client mediation needed.
   try {
     await tool.handler(
       { __shopMcpMeta: { source: "ui" }, arguments: args },
-      mockClient
+      {}
     );
   } catch (err) {
     logToolEvent(`Tool error: ${err.message}`, "error");
@@ -1372,10 +1414,9 @@ function renderProducts() {
   grid.querySelectorAll(".btn-add-to-cart").forEach(btn => {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.productId;
-      const mockClient = { requestUserInteraction: async (cb) => cb() };
       await toolRegistry["add_to_cart"].handler(
         { __shopMcpMeta: { source: "ui" }, arguments: { product_id: id, quantity: 1 } },
-        mockClient
+        {}
       );
       btn.textContent = "Added ✓";
       setTimeout(() => { btn.textContent = "Add to cart"; }, 1200);
@@ -1564,21 +1605,23 @@ async function mountApp() {
 function buildToolManifest() {
   return Object.entries(toolRegistry).map(([name, value]) => ({
     name,
+    title:       value.descriptor?.title       || name,
     description: value.descriptor?.description || "",
     parameters:  value.descriptor?.parameters  || { type: "object", properties: {} },
+    ...(value.descriptor?.annotations && { annotations: value.descriptor.annotations }),
   }));
 }
 
 /**
  * Invoke a tool on behalf of the Custom Agent.
  * Called by ag-ui-client.js TOOL_CALL handler.
- * Returns the plain-text content string to send back as TOOL_RESULT.
+ * Returns the tool's result serialized as a string for the TOOL_RESULT frame.
  */
 async function invokeToolForAgent(toolCallId, name, argsString) {
   const tool = toolRegistry[name];
   if (!tool) return JSON.stringify({ error: `Unknown tool: ${name}` });
 
-  const mockClient = { requestUserInteraction: async (cb) => cb() };
+  const mockClient = {};
 
   let args;
   try { args = JSON.parse(argsString); } catch { args = {}; }
@@ -1588,8 +1631,7 @@ async function invokeToolForAgent(toolCallId, name, argsString) {
     mockClient
   );
 
-  // result is { content: [{ type: "text", text: "..." }] }
-  return result?.content?.[0]?.text ?? JSON.stringify(result);
+  return JSON.stringify(result);
 }
 
 /**
@@ -1647,8 +1689,9 @@ function sendUserMessage(text) {
 async function boot() {
   ensureModelContextShim();
 
-  // Some browser extensions inject modelContext after page scripts run.
-  // Retry registration briefly so tools are discoverable in MCP explorers.
+  // If Chrome's "WebMCP for testing" flag is enabled, document.modelContext
+  // exists natively from the start. Retry registration briefly anyway so
+  // tools surface if the browser exposes it late (flag toggled, dev builds).
   let attempts = 0;
   const registrationTimer = setInterval(() => {
     registerToolsWithNativeModelContext();

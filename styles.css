@@ -22,7 +22,7 @@
   --accent-hover: #b50016;
 
   --green:  #16a34a;
-  --amber:  #d97706;
+  --amber:  #b45309;
   --red:    #dc2626;
 
   --highlight-bg:    #fff7ed;
@@ -672,7 +672,7 @@ code, .mono {
 }
 
 .tool-label {
-  font-size: .65rem;
+  font-size: .7rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: .06em;
@@ -775,7 +775,7 @@ code, .mono {
 }
 
 .highlight-label {
-  font-size: .65rem;
+  font-size: .7rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: .1em;
@@ -897,7 +897,7 @@ code, .mono {
 }
 
 .token-tab-badge {
-  font-size: .6rem;
+  font-size: .7rem;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: .06em;

@@ -104,7 +104,7 @@
             <h3 id="modal-title">Confirm Purchase</h3>
             <p id="modal-summary" class="modal-summary"></p>
             <div class="modal-note">
-              <span class="elicitation-label">WebMCP Elicitation</span>
+              <span class="elicitation-label">User Confirmation</span>
               The agent has requested checkout. Your confirmation is required before any purchase is completed.
             </div>
             <div class="modal-actions">
@@ -121,7 +121,7 @@
             <h3 id="otp-modal-title">🔒 Step-Up Authentication Required</h3>
             <p id="otp-hint" class="modal-summary"></p>
             <div class="modal-note">
-              <span class="elicitation-label">WebMCP Elicitation</span>
+              <span class="elicitation-label">User Confirmation</span>
               PingOne Authorize requires MFA to complete this checkout. Enter the one-time code to proceed.
             </div>
             <div class="otp-input-row">
@@ -142,7 +142,7 @@
             <h3 id="verify-modal-title">🔐 Verify Transaction</h3>
             <p id="verify-hint" class="modal-summary"></p>
             <div class="modal-note">
-              <span class="elicitation-label">WebMCP Elicitation</span>
+              <span class="elicitation-label">User Confirmation</span>
               Scan this QR code with the PingOne Verify app to approve the transaction. The page will continue automatically once approved.
             </div>
             <div class="verify-qr-wrap">
@@ -191,7 +191,7 @@
           </div>
           <p class="panel-desc">
             Simulate agent tool calls. In production, an AI agent would
-            invoke these via <code>navigator.modelContext</code>.
+            invoke these via <code>document.modelContext</code>.
           </p>
 
           <div id="tool-list" class="tool-list">

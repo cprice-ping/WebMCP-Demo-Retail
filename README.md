@@ -4,7 +4,7 @@ A fully client-side retail demo that implements the [W3C WebMCP Draft Spec](http
 
 > **The user's existing OIDC session is sufficient for agent identity — no separate agent OAuth flow is required.**
 
-A checkout request is evaluated by a PingOne Authorize policy before any order is placed. The policy receives the full request context — who the user is, which application is acting, and what they're trying to do — and can return `PERMIT`, `DENY`, or trigger a **step-up MFA challenge** that is surfaced back to the user in the browser as a WebMCP Elicitation.
+A checkout request is evaluated by a PingOne Authorize policy before any order is placed. The policy receives the full request context — who the user is, which application is acting, and what they're trying to do — and can return `PERMIT`, `DENY`, or trigger a **step-up MFA challenge** that is surfaced back to the user in the browser as an in-page confirmation modal.
 
 Live demo: **https://cprice-ping.github.io/WebMCP-Demo-Retail/**
 
@@ -45,7 +45,7 @@ Browser
 
 **Single sources of truth.** `api/products.json` owns the product catalog. `toolRegistry` owns tool metadata — the count badge, the tool cards in the UI, and the tool console select are all derived from it at runtime. Nothing is hardcoded in HTML.
 
-**Spec-compliant WebMCP.** Tools are registered as `{ name, description, inputSchema, execute, annotations }`. The `execute` function receives `(input, client)`. Return values are `{ content: [{ type: "text", text }] }`. Errors return `{ content: [...], isError: true }` — handlers never throw.
+**Spec-compliant WebMCP.** Tools are registered via `document.modelContext.registerTool({ name, title, description, inputSchema, execute, annotations }, { signal })` per the [current spec](https://webmachinelearning.github.io/webmcp/). The `execute` function receives `(inputObject, options)` where `options.signal` is an `AbortSignal` for agent-initiated cancellation. Return values are plain JSON-serializable objects — the host serializes them per spec. Handlers return `{ error: "..." }` on failure rather than throwing, so agents always receive a readable reason.
 
 ---
 
@@ -57,7 +57,7 @@ Browser
 | `add_to_cart` | Mutation | Session | Takes `product_id` + `quantity`; updates in-memory `cart{}` |
 | `view_cart` | Read | Session | `readOnlyHint: true`; returns cart contents + total as JSON |
 | `remove_from_cart` | Mutation | Session | Takes `product_id`; removes it entirely from `cart{}` |
-| `checkout` | Elicitation → `POST /api/checkout` | Session + Bearer | Elicits user confirmation, then POSTs to the server. The server validates the AT, calls PingOne Authorize, and either permits the order, denies it, or issues a step-up MFA challenge. On challenge, a second Elicitation collects the OTP, which is re-submitted to P1AZ for verification. |
+| `checkout` | Confirmation modal → `POST /api/checkout` | Session + Bearer | Shows an in-page confirmation modal (agents prompt their own via `consequentialHint`), then POSTs to the server. The server validates the AT, calls PingOne Authorize, and either permits the order, denies it, or issues a step-up MFA challenge. On challenge, an OTP modal collects the code, which is re-submitted to P1AZ for verification. |
 
 ### Session Guard
 
@@ -73,25 +73,25 @@ function requireSession() {
 }
 ```
 
-### Elicitation (checkout)
+### User confirmation (checkout)
 
-`checkout` uses the WebMCP spec's `client.requestUserInteraction(callback)` to pause and ask the user for confirmation before the `POST` is sent. When called from the UI, a `mockClient` is used that invokes the callback immediately (the modal is already in-page). When called by a native `navigator.modelContext` agent, the host provides a real `ModelContextClient`.
+The current WebMCP spec removed the tool-initiated elicitation API (`client.requestUserInteraction` no longer exists). Confirmation is now a **page concern**: `checkout` shows an in-page modal that must be approved before the `POST` is sent. Agents enforce their own user prompt using the `consequentialHint: true` annotation — the WebMCP Extension, for example, shows a permission card for any tool marked consequential. The page also honors the spec's `ToolExecuteCallbackOptions.signal`: if the agent aborts the in-flight call, the confirmation modal closes automatically.
 
-If PingOne Authorize returns a **step-up MFA challenge**, a *second* elicitation fires automatically to collect the OTP the user received by email, without any additional agent turn. The full loop:
+If PingOne Authorize returns a **step-up MFA challenge**, a second in-page modal collects the OTP the user received by email, without any additional agent turn. The full loop:
 
 ```
 Agent calls checkout
-  → Elicitation 1: confirm purchase (user clicks OK)
+  → Modal 1: confirm purchase (user clicks OK)
   → POST /api/checkout  (first pass)
   → P1AZ: DENY + deny-stepup advice  (OTP sent to user's email)
   → Server: 202 { challenge: "MFA_REQUIRED", deviceAuthenticationId }
-  → Elicitation 2: enter OTP
+  → Modal 2: enter OTP
   → POST /api/checkout  (second pass, includes otpCode + deviceAuthenticationId)
   → P1AZ: PERMIT
   → Order placed
 ```
 
-This is distinct from the MCP Protocol `elicitation/create` mechanism — because the tool and DOM share the same process, there's no need for the round-trip protocol complexity.
+Because the tool and DOM share the same process, no round-trip protocol is needed — the page's own modals are the user-interaction channel.
 
 ---
 
@@ -175,7 +175,7 @@ python3 -m http.server 8080
 The right-hand **Tool Console** panel shows every tool invocation in real time — both UI-triggered and agent-triggered calls share the same log. This makes the demo useful for explaining what an agent actually does when it calls a tool.
 
 Each log entry includes:
-- The call source (`ui` or `navigator.modelContext`)
+- The call source (`ui`, `custom-agent`, or `document.modelContext`)
 - The full outbound HTTP request (method, URL, headers including Bearer)
 - A note on which token is used and why
 - The response payload
@@ -184,18 +184,18 @@ Each log entry includes:
 
 ## WebMCP Registration
 
-Tools register via `navigator.modelContext.registerTool()`. On page load the app:
+Tools register via `document.modelContext.registerTool()` per the [current spec](https://webmachinelearning.github.io/webmcp/). On page load the app:
 
-1. Installs a shim if the browser doesn't natively support `navigator.modelContext`
-2. Retries native registration every 500ms for up to 10 seconds (browser extensions inject `navigator.modelContext` after page scripts run)
+1. Installs a shim on `document.modelContext` if the browser doesn't natively support it (tools stay callable from the UI either way)
+2. Retries native registration every 500ms for up to 10 seconds, in case the browser exposes `document.modelContext` after page scripts run (e.g. flag toggled mid-session)
 
-The registration attempts four forms in order (most-spec-compliant first) so the app works with both current and older versions of MCP Tool Explorer:
+The registration uses the current spec form — `registerTool(tool, options)` with an `AbortSignal` in options so dynamic tools (checkout, remove_from_cart) can be unregistered spec-compliantly by aborting the signal:
 
 ```js
-// Primary: W3C spec form
-navigator.modelContext.registerTool({
-  name, description, inputSchema, execute, annotations
-});
+// Primary: current spec form
+document.modelContext.registerTool({
+  name, title, description, inputSchema, execute, annotations
+}, { signal: controller.signal });
 ```
 
 ---
