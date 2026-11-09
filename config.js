@@ -26,6 +26,15 @@ const CONFIG = {
   // Leave empty to use the application's default sign-on policy.
   LOGIN_FLOW_POLICY_ID: "",
 
+  // Dedicated OIDC client for agent-initiated logins (the login tool).
+  // The resulting access_token carries THIS client_id — the "session is
+  // agentic" signal. Forwarded to PingOne Authorize as WebMCP.Request.clientId,
+  // where policy can treat agent checkouts differently (e.g. force step-up).
+  // Create a second public OIDC app (PKCE, same redirect URIs) and paste its
+  // ID here. Leave empty to reuse the main client (session not separately
+  // marked — the tool still works).
+  PINGONE_AGENTIC_CLIENT_ID: "",
+
   // AG-UI Custom Agent WebSocket endpoint.
   // Set to a wss:// URL to enable the Custom Agent panel and auto-connect on sign-in.
   // Leave empty to hide the agent panel (BCA-only demo mode).

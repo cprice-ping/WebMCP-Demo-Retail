@@ -267,12 +267,12 @@ async function startLogin() {
 // DaVinci OOB HILT challenge (e.g. PingOne Verify approval on their phone).
 // The flow is selected via acr_values when LOGIN_FLOW_POLICY_ID is set;
 // login_hint pre-fills the identity the agent collected from the user.
-async function buildAuthorizeUrl({ loginHint, verifier, state, nonce }) {
+async function buildAuthorizeUrl({ loginHint, verifier, state, nonce, clientId }) {
   const challenge = await sha256Base64url(verifier);
 
   const params = new URLSearchParams({
     response_type: "code",
-    client_id: CONFIG.PINGONE_CLIENT_ID,
+    client_id: clientId ?? CONFIG.PINGONE_CLIENT_ID,
     redirect_uri: CONFIG.PINGONE_REDIRECT_URI,
     scope: CONFIG.PINGONE_SCOPES,
     state,
@@ -297,7 +297,13 @@ async function buildAuthorizeUrl({ loginHint, verifier, state, nonce }) {
 
 // Shared PKCE + state bookkeeping for both button and tool logins.
 // Returns { authorizeUrl, verifier, state } — caller opens the URL.
-async function createLoginSession({ loginHint } = {}) {
+//
+// The login tool authorizes against the dedicated agentic client when one is
+// configured: the resulting access_token carries that client_id, which is how
+// the session is marked as agent-initiated (forwarded to PingOne Authorize
+// as WebMCP.Request.clientId for policy conditioning). Button logins keep
+// the main client.
+async function createLoginSession({ loginHint, agentic = false } = {}) {
   const verifier = randomBase64url(64);
   const state    = randomBase64url(16);
   const nonce    = randomBase64url(16);
@@ -305,11 +311,15 @@ async function createLoginSession({ loginHint } = {}) {
   sessionStorage.setItem("pkce_verifier", verifier);
   sessionStorage.setItem("oauth_state", state);
 
+  const clientId = (agentic && CONFIG.PINGONE_AGENTIC_CLIENT_ID)
+    ? CONFIG.PINGONE_AGENTIC_CLIENT_ID
+    : CONFIG.PINGONE_CLIENT_ID;
+
   const authorizeUrl = await buildAuthorizeUrl({
-    loginHint, verifier, state, nonce,
+    loginHint, verifier, state, nonce, clientId,
   });
 
-  return { authorizeUrl, verifier, state };
+  return { authorizeUrl, verifier, state, clientId };
 }
 
 // Silent token refresh using prompt=none.
@@ -513,10 +523,22 @@ async function loginToolHandler(args, executeOptions) {
   const confirmed = await showLoginEmailModal({ suggestedEmail: requestedEmail });
   if (confirmed.cancelled) return confirmed;
 
-  const { authorizeUrl, state } = await createLoginSession({ loginHint: confirmed.email });
+  // agentic: true → authorize against the dedicated agentic client when
+  // configured, so the session's access_token carries that client_id as the
+  // agent-initiated signal (surfaced to P1AZ as WebMCP.Request.clientId).
+  const { authorizeUrl, state, clientId } = await createLoginSession({
+    loginHint: confirmed.email,
+    agentic: true,
+  });
+
+  const usingAgenticClient = clientId !== CONFIG.PINGONE_CLIENT_ID;
 
   setLoginToolStatus(`Opening sign-in for ${confirmed.email}… complete the verification to continue.`);
-  logToolEvent(`[login] authorize request opened for ${confirmed.email}${CONFIG.LOGIN_FLOW_POLICY_ID ? ` (flow policy: ${CONFIG.LOGIN_FLOW_POLICY_ID})` : ""}`);
+  logToolEvent(
+    `[login] authorize request opened for ${confirmed.email}` +
+    (usingAgenticClient ? ` — agentic client ${clientId}` : "") +
+    (CONFIG.LOGIN_FLOW_POLICY_ID ? ` (flow policy: ${CONFIG.LOGIN_FLOW_POLICY_ID})` : "")
+  );
 
   // Popup needs a user gesture — the modal's submit click provides it.
   const popup = window.open(authorizeUrl, "webmcp_login", "width=460,height=720");
@@ -557,7 +579,17 @@ async function loginToolHandler(args, executeOptions) {
         name:  idTokenClaims?.name ?? idTokenClaims?.preferred_username ?? null,
         email: idTokenClaims?.email ?? confirmed.email,
       },
-      note: "User completed out-of-band verification. The storefront is now signed in and all other tools are usable.",
+      session: {
+        // The client_id the session's access_token carries — a dedicated
+        // agentic client here is the "session is agent-initiated" signal.
+        client_id:    clientId,
+        agentic:      usingAgenticClient,
+        // Surfaced to PingOne Authorize on every tool API call, where policy
+        // can condition on it (e.g. force step-up for agent checkouts).
+        az_parameter: "WebMCP.Request.clientId",
+      },
+      note: "User completed out-of-band verification. The storefront is now signed in and all other tools are usable." +
+        (usingAgenticClient ? " This session is marked as agent-initiated (dedicated agentic client)." : ""),
     };
   } catch (err) {
     const message = err?.message || String(err);
