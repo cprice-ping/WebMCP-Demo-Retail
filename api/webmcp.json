@@ -61,9 +61,30 @@
     {
       "name": "checkout",
       "title": "Checkout",
-      "description": "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. Shows an in-page confirmation modal that the user must approve before the request is sent. Dynamically registered — only available when the cart contains items.",
+      "description": "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. The host prompts the user for confirmation (consequentialHint) before this tool runs. If the policy requires step-up, returns a challenge: MFA_REQUIRED (ask the user for the OTP from their email, then call verify_checkout_otp) or VERIFY_TRANSACTION (user approves in PingOne Verify, then call check_checkout_verification). Dynamically registered — only available when the cart contains items.",
       "parameters": {},
       "annotations": { "consequentialHint": true },
+      "dynamic": true
+    },
+    {
+      "name": "verify_checkout_otp",
+      "title": "Verify Checkout OTP",
+      "description": "Completes checkout after an MFA_REQUIRED challenge. Pass the one-time code the user received by email (ask the user for it in chat). Dynamically registered while an MFA challenge is pending.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "otpCode": { "type": "string", "description": "The one-time code the user received (4-8 digits) — ask the user for it in chat." }
+        },
+        "required": ["otpCode"]
+      },
+      "annotations": { "consequentialHint": true },
+      "dynamic": true
+    },
+    {
+      "name": "check_checkout_verification",
+      "title": "Check Checkout Verification",
+      "description": "Checks whether the user has approved the pending PingOne Verify transaction (QR scan). Poll this tool — e.g. every 10 seconds — until it returns success or an error. Dynamically registered while a Verify transaction is pending.",
+      "parameters": {},
       "dynamic": true
     }
   ]

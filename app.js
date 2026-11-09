@@ -938,6 +938,145 @@ async function checkoutHandler(args, executeOptions) {
       return { error: "Cart is empty. Add items before checkout." };
     }
 
+    const invokedByAgent = executeOptions?.source === "document.modelContext";
+
+    // ── Agent path: host owns confirmation (consequentialHint) ──────
+    // The host (extension permission card / browser chrome / CUA chat) has
+    // already prompted the human before this call ran. No page modal — with
+    // a CUA in a hidden tab there is no human in-page to click, and the only
+    // thing that COULD click it is the agent, which makes it theater.
+    if (invokedByAgent) {
+      return checkoutHandlerAgent(args);
+    }
+
+    // ── Human-present path: in-page modal (UI clicks, AG-UI panel) ──
+    return checkoutHandlerHuman(args, executeOptions);
+}
+
+// Shared first-pass POST used by both paths.
+async function checkoutPost(requestBody) {
+    let apiResponse;
+    try {
+      apiResponse = await apiRequest("POST", "/checkout", {
+        body: requestBody,
+        requiresAuth: true,
+      });
+    } catch (err) {
+      // API denied or unreachable — surface the reason in the UI and re-throw
+      // so the tool console also logs it as an error.
+      showOrderDenied(err.message);
+      throw err;
+    }
+    return apiResponse;
+}
+
+// Pending PingOne Verify transaction for check_checkout_verification (agent path).
+let pendingVerifyTransaction = null;
+
+// ── Agent path ─────────────────────────────────────────────────────────
+// Stateless tool calls with the agent mediating the human loop. In CUA mode
+// the interface between tab and human is the agent chat, not the browser —
+// so in-flow feedback must return as tool results the agent relays:
+//   checkout → { success, order }                       (permitted first pass)
+//   checkout → { challenge: "MFA_REQUIRED", ... }       (P1AZ step-up)
+//              → agent asks human for the OTP in chat
+//              → verify_checkout_otp { otpCode, ... }   (second pass → permit)
+//   checkout → { challenge: "VERIFY_TRANSACTION", ... } (PingOne Verify QR)
+//              → human approves in the Verify app
+//              → check_checkout_verification {}          (page polls server)
+function checkoutHandlerAgent(args) {
+    const summary = cartSummary();
+    const order = { ...summary, order_id: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}` };
+
+    // Kick off Protect signals collection — awaited before the POST.
+    const signalsPromise = getProtectSignals();
+
+    return (async () => {
+      const signalsPayload = await signalsPromise;
+      const requestBody = {
+        order_id: order.order_id,
+        items: order.items,
+        total: order.total,
+        ...(signalsPayload && { signalsPayload }),
+      };
+
+      const apiResponse = await checkoutPost(requestBody);
+
+      // ── P1AZ interactive DENY → return as challenge for agent mediation ──
+      if (apiResponse?.denied && apiResponse.statements?.length) {
+        for (const stmt of apiResponse.statements) {
+          // Payload normally arrives pre-parsed from our server, but accept
+          // raw JSON strings too (direct PingOne-shaped responses).
+          let p = stmt.payload ?? {};
+          if (typeof p === "string") {
+            try { p = JSON.parse(p); } catch { /* leave as string */ }
+          }
+
+          if (stmt.code === "deny-stepup") {
+            logToolEvent(`[checkout] P1AZ: deny-stepup — returning challenge to agent`, "info");
+            // Stash challenge context for verify_checkout_otp
+            pendingVerifyTransaction = {
+              deviceAuthenticationId: p.deviceAuthenticationId,
+              requestBody,
+            };
+            registerAgentVerifyTools();
+            return {
+              challenge: "MFA_REQUIRED",
+              detail: p.message ?? "Step-up with MFA required. Ask the user for the one-time code sent to their email, then call verify_checkout_otp with it.",
+              deviceAuthenticationId: p.deviceAuthenticationId ?? null,
+              // Context for the verification call
+              pending_order: { order_id: order.order_id, total: order.total },
+            };
+          }
+
+          if (stmt.code === "deny-verify") {
+            logToolEvent(`[checkout] P1AZ: deny-verify — returning challenge to agent`, "info");
+            if (!p.verifyTransactionId || !p.qrUrl) {
+              const message = "deny-verify statement is missing verifyTransactionId or qrUrl.";
+              showOrderDenied(message);
+              throw new Error(message);
+            }
+            // Stash the pending transaction so check_checkout_verification can poll it
+            pendingVerifyTransaction = {
+              verifyTransactionId: p.verifyTransactionId,
+              requestBody: { ...requestBody, verifyTransactionId: p.verifyTransactionId },
+            };
+            registerAgentVerifyTools();
+            return {
+              challenge: "VERIFY_TRANSACTION",
+              detail: p.message ?? "PingOne Verify transaction started. The QR code is displayed on the page — ask the user to scan it and approve, then call check_checkout_verification.",
+              verify_transaction_id: p.verifyTransactionId,
+              qr_url: p.qrUrl,
+              web_verification_code: p.webVerificationCode ?? null,
+              pending_order: { order_id: order.order_id, total: order.total },
+            };
+          }
+
+          logToolEvent(`[checkout] P1AZ: unhandled statement code "${stmt.code}" — no handler registered`, "warn");
+        }
+
+        // All statements were unrecognised
+        const codes = apiResponse.statements.map(s => s.code).join(", ");
+        const message = `Checkout denied — unhandled statement code(s): ${codes}`;
+        showOrderDenied(message);
+        throw new Error(message);
+      }
+
+      // Permitted first pass — order placed.
+      const finalResult = apiResponse ?? { success: true, source: "demo-simulated", order };
+      showOrderSuccess(finalResult.order ?? order);
+      cart = {};
+      renderCart();
+      return {
+        ...finalResult,
+        note: "Order placed. The user was prompted by the host before this tool ran (consequentialHint).",
+      };
+    })();
+}
+
+// ── Human-present path (UI clicks, AG-UI panel) ────────────────────────
+// In-page modals are appropriate here: the human is in the tab.
+async function checkoutHandlerHuman(args, executeOptions) {
     // Spec ToolExecuteCallbackOptions carries { signal }: the agent cancelling
     // the in-flight tool call. Propagate it into the confirmation modal so an
     // aborted checkout closes the modal instead of leaving it open.
@@ -948,10 +1087,6 @@ async function checkoutHandler(args, executeOptions) {
     // by the time the user clicks Confirm. No await yet.
     const signalsPromise = getProtectSignals();
 
-    // In-page confirmation modal. The current WebMCP spec has no
-    // tool-initiated elicitation API — agents enforce user confirmation
-    // themselves via the consequentialHint annotation. The page still owns
-    // the human checkpoint: the modal must be approved before the POST.
     const userDecision = await showCheckoutModal(abortSignal);
 
     if (userDecision.cancelled) return userDecision;
@@ -1062,6 +1197,125 @@ async function checkoutHandler(args, executeOptions) {
     return finalResult;
 }
 
+// ── Agent-path verification tools ──────────────────────────────────────
+// Registered on demand when the agent path returns a challenge; unregistered
+// once verification completes, fails, or the cart empties. The agent mediates
+// the human loop: it asks in chat, then completes the flow with these calls.
+
+// verify_checkout_otp — completes an MFA_REQUIRED challenge (deny-stepup).
+const VERIFY_OTP_DESCRIPTOR = {
+  title: "Verify Checkout OTP",
+  description: "Completes checkout after an MFA_REQUIRED challenge. Pass the one-time code the user received by email (ask the user for it in chat).",
+  parameters: {
+    type: "object",
+    properties: {
+      otpCode: { type: "string", description: "The one-time code the user received (4-8 digits) — ask the user for it in chat." },
+    },
+    required: ["otpCode"],
+  },
+  annotations: { consequentialHint: true },
+  ui: {
+    labels: [{text:"MFA", cls:"tool-label-auth"}, {text:"API", cls:"tool-label-api"}],
+    desc: "Re-POSTs the pending checkout with the user's OTP for PingOne MFA verification.",
+  },
+};
+
+function verifyCheckoutOtpHandler(args) {
+  const otpCode = typeof args?.otpCode === "string" ? args.otpCode.trim() : "";
+  if (!/^\d{4,8}$/.test(otpCode)) {
+    return {
+      error: "A valid otpCode (4-8 digits) is required. Ask the user for the one-time code sent to their email, then call again.",
+      code: "OTP_REQUIRED",
+    };
+  }
+
+  return (async () => {
+    if (!pendingVerifyTransaction) {
+      return { error: "No pending MFA challenge. Call checkout first — an MFA_REQUIRED challenge registers the verification context." };
+    }
+
+    // Re-POST the stashed first-pass body + the user's OTP.
+    const requestBody = {
+      ...pendingVerifyTransaction.requestBody,
+      otpCode,
+      ...(pendingVerifyTransaction.deviceAuthenticationId && {
+        deviceAuthenticationId: pendingVerifyTransaction.deviceAuthenticationId,
+      }),
+    };
+
+    const apiResponse = await checkoutPost(requestBody);
+
+    if (apiResponse?.denied) {
+      return { error: "OTP verification failed — the code was rejected. Confirm the code with the user and retry.", challenge: apiResponse };
+    }
+
+    const finalResult = apiResponse ?? { success: true, source: "demo-simulated", order: cartSummary() };
+    showOrderSuccess(finalResult.order ?? cartSummary());
+    cart = {};
+    renderCart();
+    unregisterAgentVerifyTools();
+    pendingVerifyTransaction = null;
+    return finalResult;
+  })();
+}
+
+// check_checkout_verification — polls a VERIFY_TRANSACTION challenge to completion.
+const CHECK_VERIFICATION_DESCRIPTOR = {
+  title: "Check Checkout Verification",
+  description: "Checks whether the user has approved the pending PingOne Verify transaction (QR scan). Poll this tool — e.g. every 10 seconds — until it returns success or an error.",
+  parameters: {},
+  ui: {
+    labels: [{text:"VERIFY", cls:"tool-label-auth"}, {text:"POLL", cls:"tool-label-mutate"}],
+    desc: "Polls the pending PingOne Verify transaction; returns the order once approved.",
+  },
+};
+
+function checkCheckoutVerificationHandler() {
+  if (!pendingVerifyTransaction) {
+    return { error: "No pending verification transaction. Call checkout first — a VERIFY_TRANSACTION challenge registers the polling context." };
+  }
+
+  return (async () => {
+    const resp = await apiRequest("POST", "/checkout", {
+      body: pendingVerifyTransaction.requestBody,
+      requiresAuth: true,
+    });
+
+    if (resp?.success && resp?.order) {
+      showOrderSuccess(resp.order);
+      cart = {};
+      renderCart();
+      unregisterAgentVerifyTools();
+      pendingVerifyTransaction = null;
+      return { success: true, order: resp.order, note: "User approved the transaction in PingOne Verify." };
+    }
+
+    // Still pending — keep polling
+    return { pending: true, detail: "Verification not yet approved. Poll again (e.g. in 10 seconds)." };
+  })();
+}
+
+function unregisterAgentVerifyTools() {
+  for (const name of ["verify_checkout_otp", "check_checkout_verification"]) {
+    if (toolRegistry[name]) unregisterTool(name);
+  }
+}
+
+function registerAgentVerifyTools() {
+  let changed = false;
+  if (!toolRegistry["verify_checkout_otp"]) {
+    registerTool("verify_checkout_otp", VERIFY_OTP_DESCRIPTOR, verifyCheckoutOtpHandler);
+    logToolEvent("[tools] verify_checkout_otp registered — MFA challenge pending");
+    changed = true;
+  }
+  if (!toolRegistry["check_checkout_verification"]) {
+    registerTool("check_checkout_verification", CHECK_VERIFICATION_DESCRIPTOR, checkCheckoutVerificationHandler);
+    logToolEvent("[tools] check_checkout_verification registered — Verify transaction pending");
+    changed = true;
+  }
+  if (changed && typeof notifyToolsUpdate === "function") notifyToolsUpdate();
+}
+
 // ============================================================
 // Cart helpers
 // ============================================================
@@ -1127,6 +1381,12 @@ function syncCartTools() {
       logToolEvent(`[tools] ${name} unregistered — cart is empty`);
       changed = true;
     }
+  }
+
+  // Cart emptied — drop any pending verification context too.
+  if (!hasItems) {
+    pendingVerifyTransaction = null;
+    unregisterAgentVerifyTools();
   }
 
   if (changed) {
@@ -1449,7 +1709,10 @@ function createInstrumentedToolHandler(name, handler) {
     }
 
     try {
-      const result = await handler(args, executeOptions);
+      // Invocation source rides in executeOptions so handlers can dispatch on
+      // it: hosts (extension/native browser) own confirmation via annotations,
+      // so agent-path tools return challenges instead of showing page modals.
+      const result = await handler(args, { ...executeOptions, source });
       logToolEvent(
         `← [${source}] ${name} response (${Date.now() - started}ms): ${stringifyForLog(result)}`,
         "result", source

@@ -58,7 +58,7 @@ Browser
 | `add_to_cart` | Mutation | Session | Takes `product_id` + `quantity`; updates in-memory `cart{}` |
 | `view_cart` | Read | Session | `readOnlyHint: true`; returns cart contents + total as JSON |
 | `remove_from_cart` | Mutation | Session | Takes `product_id`; removes it entirely from `cart{}` |
-| `checkout` | Confirmation modal → `POST /api/checkout` | Session + Bearer | Shows an in-page confirmation modal (agents prompt their own via `consequentialHint`), then POSTs to the server. The server validates the AT, calls PingOne Authorize, and either permits the order, denies it, or issues a step-up MFA challenge. On challenge, an OTP modal collects the code, which is re-submitted to P1AZ for verification. |
+| `checkout` | Host prompt → `POST /api/checkout` | Session + Bearer | The host prompts the user before the tool runs (`consequentialHint`) — extension permission card, browser chrome, or agent chat. POSTs to the server, which validates the AT and calls PingOne Authorize: PERMIT → order placed; step-up challenge → returned as a tool result for agent mediation (`MFA_REQUIRED` → agent asks for the OTP → `verify_checkout_otp`; `VERIFY_TRANSACTION` → user approves in the Verify app → `check_checkout_verification`). Human-in-tab paths (button, console) use the in-page modals instead. |
 
 ### Session Guard
 
