@@ -53,7 +53,7 @@ Browser
 
 | Tool | Type | Auth required | Notes |
 |---|---|---|---|
-| `login` | OIDC popup + poll | Signed out only | Agent-initiated sign-in. Confirms the email in-page, opens the PingOne authorize request in a popup against the dedicated agentic client (whose sign-on policy routes to the OOB HILT flow), polls for the returned code, exchanges it for tokens. Unregisters itself once a session exists. |
+| `login` | OIDC popup + poll | Signed out only | Agent-initiated sign-in. The agent asks the user for their email in chat and passes it to the tool; the user approves on one click (the gesture the popup needs) and completes OOB verification in the opened window. Unregisters itself once a session exists. |
 | `view_products` | `GET /api/products.json` | Session | `readOnlyHint: true`; populates `PRODUCTS[]` and renders the grid |
 | `add_to_cart` | Mutation | Session | Takes `product_id` + `quantity`; updates in-memory `cart{}` |
 | `view_cart` | Read | Session | `readOnlyHint: true`; returns cart contents + total as JSON |
@@ -99,8 +99,11 @@ Because the tool and DOM share the same process, no round-trip protocol is neede
 The `login` tool lets an agent sign the user in without the button. The mechanism is the same OIDC authorization-code + PKCE request as the button, opened in a **popup** so the tool's `execute()` promise can keep polling while the user completes sign-in out-of-band:
 
 ```
-Agent calls login { email? }
-  → In-page modal: user confirms the email (agent-passed emails are pre-filled, never silently trusted)
+Agent calls login { email }
+  (the agent asks the user for their email in chat first — required parameter)
+  → In-page one-click confirm: shows the identity; the user's click both
+      approves it and provides the user activation the popup needs
+      (typing fallback only if the agent called without an email)
   → Popup opens: GET /as/authorize (PKCE, state, nonce, login_hint=<email>)
       — authorized against PINGONE_AGENTIC_CLIENT_ID when configured
   → PingOne routes at the agentic client's sign-on policy → the OOB HILT DaVinci flow

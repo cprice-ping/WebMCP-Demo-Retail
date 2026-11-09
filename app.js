@@ -462,46 +462,71 @@ function pollForLoginRelay({ timeoutMs = 180_000, intervalMs = 1_000, signal = n
   });
 }
 
-// Email-entry modal for the login tool. Resolves { email } on submit or
-// { cancelled } — mirrors the checkout modal's contract. An email the agent
-// passed is pre-filled but still requires the human to confirm (submit).
+// One-click confirmation modal for the login tool. The email is collected by
+// the AGENT in chat and passed as args.email — the modal never asks the human
+// to type. It exists for two reasons:
+//   1. Gesture: the extension invokes tools via the content script, so
+//      window.open() has no user activation in the page and the popup would
+//      be blocked without a click here.
+//   2. Transparency: the human sees exactly which identity is about to be
+//      used before the sign-in window opens.
+// Resolves { email, confirmed } on click, or { cancelled }.
 function showLoginEmailModal({ suggestedEmail } = {}) {
   return new Promise((resolvePromise) => {
-    const modal = document.getElementById("modal-login-email");
-    const input = document.getElementById("login-email-input");
-    const hint  = document.getElementById("login-email-hint");
+    const modal    = document.getElementById("modal-login-email");
+    const input    = document.getElementById("login-email-input");
+    const inputRow = document.getElementById("login-email-input-row");
+    const hint     = document.getElementById("login-email-hint");
+    const note     = document.getElementById("login-email-note");
+    const submit   = document.getElementById("login-email-submit");
 
     if (hint) hint.textContent = suggestedEmail
-      ? `The assistant wants to sign you in as ${suggestedEmail}. Confirm your email — a sign-in window will open and you'll complete verification there (e.g. approve on your phone).`
-      : "The assistant needs you to sign in. Enter your email — a sign-in window will open and you'll complete verification there (e.g. approve on your phone).";
-    if (input) input.value = suggestedEmail ?? "";
-    modal.classList.remove("hidden");
-    requestAnimationFrame(() => input?.focus());
+      ? "The assistant wants to sign you in. Approving opens a sign-in window where you'll complete verification (e.g. approve on your phone)."
+      : "The assistant wants to sign you in but didn't say which account. Enter your email — a sign-in window will open and you'll complete verification there.";
 
-    const submit = document.getElementById("login-email-submit");
-    const cancel = document.getElementById("login-email-cancel");
+    const needsEmail = !suggestedEmail;
+    if (inputRow) inputRow.classList.toggle("hidden", !needsEmail);
+    if (input) input.value = "";
+    if (note) note.textContent = needsEmail
+      ? "Enter the address, then continue to open the sign-in window."
+      : `Sign-in will be started for ${suggestedEmail}.`;
+    if (submit) submit.textContent = needsEmail ? "Continue" : "Open Sign-In Window";
+    if (submit && needsEmail) submit.disabled = true;
+    if (submit && !needsEmail) submit.disabled = false;
+
+    modal.classList.remove("hidden");
+    if (needsEmail) requestAnimationFrame(() => input?.focus());
 
     function cleanup() {
       modal.classList.add("hidden");
       submit.replaceWith(submit.cloneNode(true));
-      cancel.replaceWith(cancel.cloneNode(true));
+      document.getElementById("login-email-cancel").replaceWith(
+        document.getElementById("login-email-cancel").cloneNode(true));
     }
 
-    function trySubmit() {
-      const email = (input?.value ?? "").trim();
-      if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return;
+    function resolveWith() {
+      // Agent-supplied email wins; the hidden input is only for the
+      // no-email fallback path. Validate whichever source is active.
+      const email = needsEmail ? (input?.value ?? "").trim() : suggestedEmail;
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return;
       cleanup();
-      resolvePromise({ email });
+      resolvePromise({ email, confirmed: true });
     }
 
-    document.getElementById("login-email-submit").addEventListener("click", trySubmit, { once: true });
+    // Typing path (agent gave no email): enable Continue once valid
+    input?.addEventListener("input", () => {
+      const el = document.getElementById("login-email-submit");
+      if (el) el.disabled = !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(input.value.trim());
+    });
+    input?.addEventListener("keydown", function onKey(e) {
+      if (e.key === "Enter") { input.removeEventListener("keydown", onKey); resolveWith(); }
+    });
+
+    document.getElementById("login-email-submit").addEventListener("click", resolveWith, { once: true });
     document.getElementById("login-email-cancel").addEventListener("click", () => {
       cleanup();
       resolvePromise({ cancelled: true, reason: "User cancelled login" });
     }, { once: true });
-    input?.addEventListener("keydown", function onKey(e) {
-      if (e.key === "Enter") { input.removeEventListener("keydown", onKey); trySubmit(); }
-    });
   });
 }
 
@@ -515,8 +540,8 @@ async function loginToolHandler(args, executeOptions) {
   const abortSignal = executeOptions?.signal ?? null;
   const requestedEmail = typeof args?.email === "string" ? args.email.trim() : "";
 
-  // Always confirm the email in-page before launching — the agent may pass
-  // an address, and the human gets a final say over whose identity is used.
+  // The agent collects the email in chat and passes it here. If it didn't,
+  // the modal offers a typing fallback (rare path — agents should ask).
   const confirmed = await showLoginEmailModal({ suggestedEmail: requestedEmail });
   if (confirmed.cancelled) return confirmed;
 
@@ -915,13 +940,13 @@ function requireSession() {
 // (signing in again is a button action at that point).
 const LOGIN_TOOL_DESCRIPTOR = {
   title: "Login",
-  description: "Signs the user in via PingOne. Opens a sign-in window where the user completes out-of-band verification (e.g. approving on their phone); polls until sign-in completes. Optionally pass the user's email address to pre-fill the sign-in — the user always confirms it in-page before the window opens. Only usable when signed out.",
+  description: "Signs the user in via PingOne. Ask the user for their account email address in chat first, then pass it as the email parameter — the user confirms it on one click and completes out-of-band verification in the opened sign-in window (e.g. approving on their phone). This tool polls until sign-in completes. Only usable when signed out.",
   parameters: {
     type: "object",
     properties: {
-      email: { type: "string", description: "The user's email address, if known. Shown to the user for confirmation before sign-in starts." },
+      email: { type: "string", description: "The user's email address — ask the user for it in chat before calling this tool." },
     },
-    required: [],
+    required: ["email"],
   },
   ui: {
     labels: [{text:"OIDC", cls:"tool-label-api"}, {text:"OOB", cls:"tool-label-auth"}, {text:"POLL", cls:"tool-label-mutate"}],

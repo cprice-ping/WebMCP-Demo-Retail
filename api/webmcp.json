@@ -5,13 +5,13 @@
     {
       "name": "login",
       "title": "Login",
-      "description": "Signs the user in via PingOne. Opens a sign-in window where the user completes out-of-band verification (e.g. approving on their phone); polls until sign-in completes. Optionally pass the user's email address to pre-fill the sign-in — the user always confirms it in-page before the window opens. Only usable when signed out.",
+      "description": "Signs the user in via PingOne. Ask the user for their account email address in chat first, then pass it as the email parameter — the user confirms it on one click and completes out-of-band verification in the opened sign-in window (e.g. approving on their phone). This tool polls until sign-in completes. Only usable when signed out.",
       "parameters": {
         "type": "object",
         "properties": {
-          "email": { "type": "string", "description": "The user's email address, if known. Shown to the user for confirmation before sign-in starts." }
+          "email": { "type": "string", "description": "The user's email address — ask the user for it in chat before calling this tool." }
         },
-        "required": []
+        "required": ["email"]
       },
       "annotations": { "readOnlyHint": false, "consequentialHint": false }
     },
