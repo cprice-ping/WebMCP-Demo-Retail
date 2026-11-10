@@ -135,6 +135,15 @@
     if (_reconnectTimer) { clearTimeout(_reconnectTimer); _reconnectTimer = null; }
     if (_ws) { _ws.close(); _ws = null; }
 
+    // Re-validate at the socket boundary — config.js's check guards what gets
+    // persisted/prefilled; this guards what actually opens. Fails safe: no
+    // socket, no SITE_CONNECT, no tool manifest leaves the page.
+    if (typeof validateAgentUrl !== "function" || !validateAgentUrl(wsUrl)) {
+      console.warn(`[ag-ui] refusing to connect to "${wsUrl}" — not allowlisted (agent WebSocket allowlist)`);
+      if (typeof _updateStatus === "function") _updateStatus("disconnected");
+      return;
+    }
+
     _wsUrl         = wsUrl;
     _siteLabel     = siteLabel;
     _getManifest   = getManifestFn;

@@ -664,6 +664,20 @@ async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
   const url = CONFIG.SHOP_API_BASE + path;
   const headers = { "Content-Type": "application/json" };
 
+  // Defense in depth: never attach the bearer token to a non-allowlisted
+  // origin, even if CONFIG.SHOP_API_BASE was somehow poisoned after load.
+  // (Primary check lives in config.js's validateApiBase — this guards the
+  // token-attachment point itself.)
+  if (requiresAuth) {
+    const target = new URL(url, window.location.origin);
+    const validated = validateApiBase(target.origin);
+    if (!validated) {
+      const message = `Refusing to send Authorization to non-allowlisted origin: ${target.origin}`;
+      logToolEvent(`[api] blocked: ${message}`, "error");
+      throw new Error(message);
+    }
+  }
+
   if (requiresAuth) {
     // access_token is the correct Bearer credential for resource servers.
     // id_token is an identity assertion for the client only — sending it as
@@ -1257,7 +1271,16 @@ document.addEventListener("DOMContentLoaded", () => {
       const urlInput = document.getElementById("agent-url-input");
       const url = urlInput?.value.trim();
       if (!url) return;
-      connectToAgent(url, SITE_LABEL, buildToolManifest, invokeToolForAgent, onAgentTextMessage);
+      // Explicit user click is the only path to connect (no auto-connect).
+      // connectToAgent re-validates and refuses non-allowlisted hosts; the
+      // status line shows which host is being connected to.
+      if (typeof connectToAgent === "function") {
+        connectToAgent(url, SITE_LABEL, buildToolManifest, invokeToolForAgent, onAgentTextMessage);
+        try {
+          const host = new URL(url).host;
+          logToolEvent(`[agent] connecting to ${host} (user-initiated)`);
+        } catch { /* connectToAgent validates and warns */ }
+      }
     }
   });
 
@@ -1518,18 +1541,44 @@ function sanitizeRequestForLog(rawRequest) {
   return copy;
 }
 
+// ── Invocation provenance ──────────────────────────────────────────────
+// Provenance must NOT come from the call payload: a native caller (an agent,
+// or injected instructions inside tool input) could pass
+// { __shopMcpMeta: { source: "ui" }, arguments: {...} } and reach the
+// human-present path (e.g. checkoutHandlerHuman). Instead, internal callers
+// mark their request objects with a module-private token that outside
+// callers cannot forge. NOTE: this prevents payload-supplied provenance, not
+// a hostile same-origin script — anything running in the page can do
+// anything the page can.
+const _internalInvocationMarker = Symbol("shopMcpInternalInvocation");
+const _markedInvocations = new WeakSet();
+// Internal callers tag via this closure; the marker itself never crosses a
+// function boundary an outside caller controls and is not exposed on window.
+function markInternalInvocation(request, source) {
+  _markedInvocations.add(request);
+  request.__shopMcpMeta = { source };
+  return request;
+}
+function readInternalInvocationSource(request) {
+  if (!request || typeof request !== "object" || !_markedInvocations.has(request)) return null;
+  return request.__shopMcpMeta?.source ?? null;
+}
+
 // Per the current spec, execute(inputObject, options) receives the plain
 // input object and returns any JSON-serializable value — the host does the
-// serialization. UI-triggered calls wrap args in { __shopMcpMeta, arguments }
-// so we can distinguish the two call paths for logging.
+// serialization. Internal callers (UI console, product grid, AG-UI bridge)
+// mark their calls with the private token above; every unmarked call is
+// treated as a native agent invocation (source "document.modelContext") —
+// the fail-safe default, since the agent path is the stricter one.
 function normalizeToolInvocation(rawRequest) {
   const request = rawRequest ?? {};
-  const metaSource = request?.__shopMcpMeta?.source;
-  const isWrapped = metaSource === "ui" || metaSource === "custom-agent";
-  const source = isWrapped ? metaSource : "document.modelContext";
-  const args = isWrapped ? (request.arguments ?? {}) : request;
-  const requestForLog = sanitizeRequestForLog(request);
-  return { source, args, requestForLog };
+  const internalSource = readInternalInvocationSource(request);
+  if (internalSource) {
+    return { source: internalSource, args: request.arguments ?? {}, requestForLog: sanitizeRequestForLog(request) };
+  }
+  // Native call: strip any forged __shopMcpMeta before handlers see it.
+  const clean = sanitizeRequestForLog(request);
+  return { source: "document.modelContext", args: clean, requestForLog: clean };
 }
 
 // execute(inputObject, options) — spec-compliant signature. options carries
@@ -1585,7 +1634,7 @@ async function invokeTool(name, args = {}) {
   // handle all user interaction directly, no client mediation needed.
   try {
     await tool.handler(
-      { __shopMcpMeta: { source: "ui" }, arguments: args },
+      markInternalInvocation({ arguments: args }, "ui"),
       {}
     );
   } catch (err) {
@@ -1693,7 +1742,7 @@ function renderProducts() {
     btn.addEventListener("click", async () => {
       const id = btn.dataset.productId;
       await toolRegistry["add_to_cart"].handler(
-        { __shopMcpMeta: { source: "ui" }, arguments: { product_id: id, quantity: 1 } },
+        markInternalInvocation({ arguments: { product_id: id, quantity: 1 } }, "ui"),
         {}
       );
       btn.textContent = "Added ✓";
@@ -1880,21 +1929,16 @@ async function mountApp() {
 
   // ── AG-UI Custom Agent ──────────────────────────────────────
   // Show/hide the agent panel based on whether a URL is configured.
+  // ?agentUrl= prefills the input ONLY — connecting hands TOOL_CALL
+  // execution to the remote end, so it requires an explicit user click
+  // on Connect (which re-validates via connectToAgent's own check).
   const agentPanel = document.getElementById("agent-panel");
   if (agentPanel) {
     if (CONFIG.AGUI_AGENT_URL) {
       agentPanel.classList.remove("hidden");
-      // Pre-fill the URL input with the configured value
       const urlInput = document.getElementById("agent-url-input");
       if (urlInput) urlInput.value = CONFIG.AGUI_AGENT_URL;
-      // Auto-connect
-      connectToAgent(
-        CONFIG.AGUI_AGENT_URL,
-        SITE_LABEL,
-        buildToolManifest,
-        invokeToolForAgent,
-        onAgentTextMessage
-      );
+      // No auto-connect — the user must click Connect.
     } else {
       agentPanel.classList.add("hidden");
     }
@@ -1934,7 +1978,7 @@ async function invokeToolForAgent(toolCallId, name, argsString) {
   try { args = JSON.parse(argsString); } catch { args = {}; }
 
   const result = await tool.handler(
-    { __shopMcpMeta: { source: "custom-agent" }, arguments: args },
+    markInternalInvocation({ arguments: args }, "custom-agent"),
     mockClient
   );
 
