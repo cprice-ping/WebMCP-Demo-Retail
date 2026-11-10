@@ -921,12 +921,12 @@ async function removeFromCartHandler({ product_id }) {
 // Tool: checkout — registered dynamically via syncCartTools() when cart has items
 const CHECKOUT_DESCRIPTOR = {
     title: "Checkout",
-    description: "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. Requires an active user session. Places a real order — the in-page confirmation modal must be approved by the user before the request is sent. Returns an error if the user is not signed in or the cart is empty.",
+    description: "Places the current cart as an order via POST /api/checkout using the user's access_token as a Bearer credential. Requires an active user session and a non-empty cart. The host prompts the user for confirmation before this tool runs (consequentialHint). If the authorization policy requires step-up, the tab navigates to a PingOne verification flow — the user approves out-of-band and the tool is called again once the app returns with a fresh session.",
     parameters: {},
     annotations: { consequentialHint: true },
     ui: {
       labels: [{text:"CONFIRM", cls:"tool-label-confirm"}, {text:"API", cls:"tool-label-api"}, {text:"BEARER", cls:"tool-label-auth"}],
-      desc: "POST <code>/api/checkout</code> — shows an in-page confirmation modal, then calls the API with <code>Authorization: Bearer &lt;access_token&gt;</code>.",
+      desc: "POST <code>/api/checkout</code> with <code>Authorization: Bearer &lt;access_token&gt;</code>. Host-prompted (consequentialHint); P1AZ may demand OOB step-up.",
     },
 };
 
