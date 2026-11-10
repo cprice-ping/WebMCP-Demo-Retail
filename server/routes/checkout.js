@@ -138,6 +138,11 @@ router.post("/", async (req, res) => {
     ...agentIdentityParameters(claims),   // WebMCP.Request.clientId, WebMCP.Request.scope
     "WebMCP.Request.orderTotal":                  String(total ?? 0),
     "WebMCP.Request.orderItemCount":              String(items.length),
+    // Session timing — lets policy condition on consent/step-up freshness.
+    // auth_time: when the user last authenticated (fresh after an OOB
+    // step-up round-trip); iat: when this token was issued.
+    ...(claims.auth_time && { "WebMCP.Request.authTime":            String(claims.auth_time) }),
+    ...(claims.iat       && { "WebMCP.Request.tokenIssuedAt":       String(claims.iat) }),
     // PingOne Protect context
     "WebMCP.Request.Protect.ipAddress":           clientIp,
     "WebMCP.Request.Protect.userAgent":           userAgent,
