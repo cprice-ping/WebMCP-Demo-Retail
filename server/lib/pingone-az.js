@@ -49,26 +49,29 @@ const P1_API  = "https://api.pingone.com/v1";
  * These parameters give your P1AZ policy consistent, named attributes to
  * condition on for every tool call:
  *
- *   WebMCP.clientId  — which application / agent context is acting
- *   WebMCP.scope     — what permissions were granted to it
+ *   Request.clientId  — which application / agent context is acting
+ *   Request.scope     — what permissions were granted to it
  *
- * All parameters are prefixed "WebMCP." — the P1AZ Trust Framework namespace
- * folder for this demo, keeping it separate from other policies.
+ * All parameters are prefixed "Request." — the P1AZ Trust Framework namespace
+ * folder for this demo's decision endpoint. P1AZ's namespace separation
+ * feature maps the WebMCP decision endpoint(s) to their own Trust Framework
+ * root, so this folder sits at the top level as Request.* rather than under
+ * a WebMCP. prefix.
  * Dots within names are avoided (P1AZ treats them as sub-folder paths);
- * camelCase is used within the WebMCP. namespace instead.
+ * camelCase is used within the Request. namespace instead.
  *
  * User identity (who) is handled separately via userContext.user.id.
  *
  * Spread into azParameters before adding action-specific attributes:
- *   const params = { ...agentIdentityParameters(claims), "WebMCP.orderTotal": "99" };
+ *   const params = { ...agentIdentityParameters(claims), "Request.orderTotal": "99" };
  *
  * @param {object} claims  Decoded, validated AT payload
  * @returns {object}       Flat key-value pairs ready for the `parameters` block
  */
 export function agentIdentityParameters(claims) {
   return {
-    "WebMCP.Request.clientId": claims.client_id ?? claims.azp ?? "",
-    "WebMCP.Request.scope":    claims.scope ?? "",
+    "Request.clientId": claims.client_id ?? claims.azp ?? "",
+    "Request.scope":    claims.scope ?? "",
   };
 }
 
@@ -185,7 +188,7 @@ export async function requestDecision(userClaims, parameters = {}) {
   console.log(`[AZ] Decision request — user: ${maskSubject(userClaims.sub)}`);
   // Log parameters individually — signals payload is large so show length only.
   for (const [k, v] of Object.entries(parameters)) {
-    const display = k === "WebMCP.Request.Protect.signalsPayload"
+    const display = k === "Request.Protect.signalsPayload"
       ? `<${String(v).length} chars>`
       : v;
     console.log(`[AZ]   ${k}: ${display}`);

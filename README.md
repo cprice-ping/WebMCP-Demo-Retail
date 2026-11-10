@@ -121,7 +121,7 @@ No popup, no in-page confirmation UI, no relay: a main-frame navigation needs no
 3. In PingOne, map that flow policy to the **agentic client's** sign-on policy (`PINGONE_AGENTIC_CLIENT_ID`) — tool logins route to the OOB flow automatically; button logins on the main client keep the default policy.
 4. The redirect URI is the same one already registered (`PINGONE_REDIRECT_URI`) — the tab itself returns to the app.
 
-This is agent-initiated HILT: the identity was collected by the agent, the human approved it out-of-band on a device they hold, and the resulting code lands in a session marked as agent-initiated by the agentic client's `client_id` — which the server forwards to PingOne Authorize as `WebMCP.Request.clientId` for policy conditioning.
+This is agent-initiated HILT: the identity was collected by the agent, the human approved it out-of-band on a device they hold, and the resulting code lands in a session marked as agent-initiated by the agentic client's `client_id` — which the server forwards to PingOne Authorize as `Request.clientId` for policy conditioning.
 
 ---
 
@@ -266,8 +266,8 @@ POST /api/checkout
   1. Validate AT signature via PingOne JWKS  (server can do this; browser cannot)
   2. client_credentials → PingOne worker token  (secret never leaves the server)
   3. POST /decisionEndpoints/{id}
-       parameters:   { WebMCP.Request.clientId, WebMCP.Request.scope,
-                       WebMCP.Request.orderTotal, WebMCP.Request.orderItemCount }
+       parameters:   { Request.clientId, Request.scope,
+                       Request.orderTotal, Request.orderItemCount }
        userContext:  { user: { id: <sub> } }
   4a. PERMIT  → return order receipt
   4b. DENY + deny-stepup advice
@@ -279,7 +279,7 @@ POST /api/checkout
   1-2. Same AT validation + worker token
   3. POST /decisionEndpoints/{id}
        parameters:   { ...same as first pass,
-                       WebMCP.Request.otpCode, WebMCP.Request.deviceAuthenticationId }
+                       Request.otpCode, Request.deviceAuthenticationId }
        userContext:  { user: { id: <sub> } }
   4a. PERMIT  → return order receipt
   4b. DENY    → 403 { decision, advice }
@@ -334,11 +334,11 @@ Update `ALLOWED_ORIGIN` in [server/k8s/deployment.yaml](server/k8s/deployment.ya
 
 ## PingOne Authorize Policy
 
-The checkout route uses a PingOne Authorize **Decision Endpoint** to evaluate every checkout request before processing the order. The policy receives request context as flat parameters under the `WebMCP.Request` Trust Framework namespace and user identity from `userContext`.
+The checkout route uses a PingOne Authorize **Decision Endpoint** to evaluate every checkout request before processing the order. The policy receives request context as flat parameters under the `Request` Trust Framework namespace and user identity from `userContext`.
 
-### Trust Framework — `WebMCP` → `Request` folder
+### Trust Framework — `Request` folder
 
-Create these attributes under **Authorize → Trust Framework → Attributes → WebMCP → Request**:
+Create these attributes under **Authorize → Trust Framework → Attributes → Request** (the decision endpoint's namespace root):
 
 | Attribute | Type | Present on |
 |---|---|---|
@@ -349,13 +349,13 @@ Create these attributes under **Authorize → Trust Framework → Attributes →
 | `otpCode` | String | Second pass only (MFA verification) |
 | `deviceAuthenticationId` | String | Second pass only (MFA verification) |
 
-In decision endpoint parameters these are referenced as e.g. `WebMCP.Request.clientId` (folder path + attribute name).
+In decision endpoint parameters these are referenced as e.g. `Request.clientId` (folder path + attribute name).
 
 ### Policy — two rules
 
 **Rule 1: First pass → step-up MFA**
 
-Condition: `WebMCP.Request.otpCode` is blank (first pass — no OTP yet provided)
+Condition: `Request.otpCode` is blank (first pass — no OTP yet provided)
 
 Effect: `DENY`
 
@@ -367,9 +367,9 @@ Obligation: trigger PingOne MFA to send an OTP to the user identified by `userCo
 
 **Rule 2: Second pass → verify OTP and permit**
 
-Condition: `WebMCP.Request.otpCode` is present **AND** `WebMCP.Request.deviceAuthenticationId` is present
+Condition: `Request.otpCode` is present **AND** `Request.deviceAuthenticationId` is present
 
-Effect: Use `WebMCP.Request.deviceAuthenticationId` + `WebMCP.Request.otpCode` to call PingOne MFA verify. If the OTP is valid → `PERMIT`. If invalid → `DENY`.
+Effect: Use `Request.deviceAuthenticationId` + `Request.otpCode` to call PingOne MFA verify. If the OTP is valid → `PERMIT`. If invalid → `DENY`.
 
 ### Worker Application
 

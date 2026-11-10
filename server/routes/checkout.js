@@ -124,7 +124,7 @@ router.post("/", async (req, res) => {
   // Dots within names are avoided (P1AZ treats them as sub-folder paths);
   // camelCase is used within the WebMCP. namespace instead.
   //
-  // PingOne Protect context lives under WebMCP.Request.Protect.:
+  // PingOne Protect context lives under Request.Protect.:
   //   ipAddress     — client IP from X-Forwarded-For or req.ip
   //   userAgent     — browser User-Agent
   //   signalsPayload — getData() string from the Protect SDK
@@ -135,22 +135,22 @@ router.post("/", async (req, res) => {
   const userAgent = req.headers["user-agent"] ?? "";
 
   const azParameters = {
-    ...agentIdentityParameters(claims),   // WebMCP.Request.clientId, WebMCP.Request.scope
-    "WebMCP.Request.orderTotal":                  String(total ?? 0),
-    "WebMCP.Request.orderItemCount":              String(items.length),
+    ...agentIdentityParameters(claims),   // Request.clientId, Request.scope
+    "Request.orderTotal":                  String(total ?? 0),
+    "Request.orderItemCount":              String(items.length),
     // Session timing — lets policy condition on consent/step-up freshness.
     // auth_time: when the user last authenticated (fresh after an OOB
     // step-up round-trip); iat: when this token was issued.
-    ...(claims.auth_time && { "WebMCP.Request.authTime":            String(claims.auth_time) }),
-    ...(claims.iat       && { "WebMCP.Request.tokenIssuedAt":       String(claims.iat) }),
+    ...(claims.auth_time && { "Request.authTime":            String(claims.auth_time) }),
+    ...(claims.iat       && { "Request.tokenIssuedAt":       String(claims.iat) }),
     // PingOne Protect context
-    "WebMCP.Request.Protect.ipAddress":           clientIp,
-    "WebMCP.Request.Protect.userAgent":           userAgent,
-    ...(signalsPayload && { "WebMCP.Request.Protect.signalsPayload": signalsPayload }),
+    "Request.Protect.ipAddress":           clientIp,
+    "Request.Protect.userAgent":           userAgent,
+    ...(signalsPayload && { "Request.Protect.signalsPayload": signalsPayload }),
     // Second-pass MFA verification — present only when the user supplied an OTP
-    ...(otpCode               && { "WebMCP.Request.otpCode":               otpCode }),
-    ...(deviceAuthenticationId && { "WebMCP.Request.deviceAuthenticationId": deviceAuthenticationId }),
-    ...(verifyTransactionId    && { "WebMCP.Request.verifyTransactionId":    verifyTransactionId }),
+    ...(otpCode               && { "Request.otpCode":               otpCode }),
+    ...(deviceAuthenticationId && { "Request.deviceAuthenticationId": deviceAuthenticationId }),
+    ...(verifyTransactionId    && { "Request.verifyTransactionId":    verifyTransactionId }),
   };
 
   let decision;
