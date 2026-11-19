@@ -451,55 +451,27 @@ async function loginToolHandler(args) {
 // ============================================================
 // WebMCP tool registration
 // Per the current spec (webmachinelearning.github.io/webmcp), the API
-// entry point is document.modelContext. A shim is installed for browsers
-// that don't implement it yet — tools remain callable via the UI.
+// entry point is document.modelContext. In browsers without native support
+// it is provided by the W3C polyfill (vendor/webmcp-polyfill.js, loaded
+// before this file), so the same spec code path runs everywhere. The
+// polyfill gives the page the API, not a connection to a browser agent:
+// external agents still need native support or an extension.
 // ============================================================
 
 const toolRegistry = {};
-const nativeRegisteredTools = new Set();
-const nativeRegistrationFailures = new Map();
+const modelContextTools = new Set();
+const modelContextFailures = new Map();
 // Per spec there is no unregisterTool(): a tool is unregistered by
 // aborting the AbortSignal passed to registerTool(tool, { signal }).
-const nativeToolSignals = new Map(); // tool name -> AbortController
+const modelContextSignals = new Map(); // tool name -> AbortController
 
-function ensureModelContextShim() {
-  if (typeof document === "undefined") return null;
-
-  if (!document.modelContext) {
-    const shim = {
-      __shopMcpShim: true,
-      async registerTool(name, descriptor, handler) {
-        toolRegistry[name] = { descriptor, handler };
-      },
-      unregisterTool(name) {
-        delete toolRegistry[name];
-      },
-      listTools() {
-        return Object.entries(toolRegistry).map(([name, value]) => ({
-          name,
-          description: value.descriptor?.description || "",
-          parameters: value.descriptor?.parameters || {},
-        }));
-      },
-      async callTool(name, args = {}) {
-        const tool = toolRegistry[name];
-        if (!tool) throw new Error(`Unknown tool: ${name}`);
-        return tool.handler(args);
-      },
-    };
-
-    document.modelContext = shim;
-  }
-
-  return document.modelContext;
-}
-
-function registerToolsWithNativeModelContext() {
+function registerToolsWithModelContext() {
+  // Absent only outside a secure context (the polyfill installs nothing
+  // there) — tools stay callable from the UI via toolRegistry either way.
   if (typeof document === "undefined" || !document.modelContext?.registerTool) return;
-  if (document.modelContext.__shopMcpShim) return;
 
   Object.entries(toolRegistry).forEach(([name, value]) => {
-    if (nativeRegisteredTools.has(name)) return;
+    if (modelContextTools.has(name)) return;
 
     const inputSchema = value.descriptor?.parameters || { type: "object", properties: {} };
     const annotations = value.descriptor?.annotations;
@@ -541,11 +513,11 @@ function registerToolsWithNativeModelContext() {
           if (maybePromise?.catch) {
             maybePromise.catch(err => {
               logToolEvent(`registerTool("${name}") rejected: ${err?.message ?? err}`, "warn");
-              nativeRegisteredTools.delete(name);
-              nativeToolSignals.delete(name);
+              modelContextTools.delete(name);
+              modelContextSignals.delete(name);
             });
           }
-          nativeToolSignals.set(name, controller);
+          modelContextSignals.set(name, controller);
           registered = true;
           break;
         } catch (e) {
@@ -554,22 +526,22 @@ function registerToolsWithNativeModelContext() {
       }
 
       if (registered) {
-        nativeRegisteredTools.add(name);
-        nativeRegistrationFailures.delete(name);
+        modelContextTools.add(name);
+        modelContextFailures.delete(name);
         logToolEvent(`Registered tool "${name}" via document.modelContext`);
         return;
       }
 
-      const prev = nativeRegistrationFailures.get(name);
+      const prev = modelContextFailures.get(name);
       if (prev !== lastErrorMessage) {
-        nativeRegistrationFailures.set(name, lastErrorMessage);
+        modelContextFailures.set(name, lastErrorMessage);
         logToolEvent(`document.modelContext.registerTool unavailable: ${lastErrorMessage}`, "warn");
       }
     } catch (e) {
       const msg = e?.message || String(e);
-      const prev = nativeRegistrationFailures.get(name);
+      const prev = modelContextFailures.get(name);
       if (prev !== msg) {
-        nativeRegistrationFailures.set(name, msg);
+        modelContextFailures.set(name, msg);
         logToolEvent(`document.modelContext.registerTool unavailable: ${msg}`, "warn");
       }
     }
@@ -579,27 +551,21 @@ function registerToolsWithNativeModelContext() {
 function registerTool(name, descriptor, handler) {
   const instrumentedHandler = createInstrumentedToolHandler(name, handler);
   toolRegistry[name] = { descriptor, handler: instrumentedHandler, rawHandler: handler };
-
-  const modelContext = ensureModelContextShim();
-  if (modelContext?.__shopMcpShim && modelContext.registerTool) {
-    modelContext.registerTool(name, descriptor, instrumentedHandler);
-  }
-
-  registerToolsWithNativeModelContext();
+  registerToolsWithModelContext();
 }
 
 function unregisterTool(name) {
   delete toolRegistry[name];
-  nativeRegisteredTools.delete(name);
+  modelContextTools.delete(name);
 
   // Spec mechanism: abort the AbortSignal given at registration time.
-  const controller = nativeToolSignals.get(name);
+  const controller = modelContextSignals.get(name);
   if (controller) {
     try { controller.abort(); } catch (_) { /* already aborted */ }
-    nativeToolSignals.delete(name);
+    modelContextSignals.delete(name);
   }
 
-  if (document.modelContext && !document.modelContext.__shopMcpShim) {
+  if (document.modelContext) {
     try { document.modelContext.unregisterTool?.(name); } catch (_) { /* older impls */ }
   }
 }
@@ -2038,19 +2004,8 @@ function sendUserMessage(text) {
 // ============================================================
 
 async function boot() {
-  ensureModelContextShim();
-
-  // If Chrome's "WebMCP for testing" flag is enabled, document.modelContext
-  // exists natively from the start. Retry registration briefly anyway so
-  // tools surface if the browser exposes it late (flag toggled, dev builds).
-  let attempts = 0;
-  const registrationTimer = setInterval(() => {
-    registerToolsWithNativeModelContext();
-    attempts += 1;
-    if (attempts >= 20 || Object.keys(toolRegistry).every(name => nativeRegisteredTools.has(name))) {
-      clearInterval(registrationTimer);
-    }
-  }, 500);
+  // document.modelContext (native or polyfill) exists before app.js runs,
+  // so each registerTool() call registers immediately — no retry needed.
 
   // Check if we're returning from an OIDC redirect
   const isCallback = await handleCallback();
