@@ -664,6 +664,9 @@ async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
   const url = CONFIG.SHOP_API_BASE + path;
   const headers = { "Content-Type": "application/json" };
 
+  // TokenProvider seam — works for browser and broker auth modes alike.
+  const token = requiresAuth ? await getAccessToken() : null;
+
   // Defense in depth: never attach the bearer token to a non-allowlisted
   // origin, even if CONFIG.SHOP_API_BASE was somehow poisoned after load.
   // (Primary check lives in config.js's validateApiBase — this guards the
@@ -682,12 +685,12 @@ async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
     // access_token is the correct Bearer credential for resource servers.
     // id_token is an identity assertion for the client only — sending it as
     // a Bearer to an API is wrong and the RS will reject it.
-    const token = sessionStorage.getItem("access_token");
+    // (Token came from the TokenProvider seam above — browser or broker mode.)
 
     // 1. Existence check (browser can do this)
     if (!token) {
       throw new Error(
-        "No access_token in sessionStorage — user must sign in before calling a protected tool. " +
+        "No access_token available — user must sign in before calling a protected tool. " +
         "Note: the id_token is intentionally NOT used here; it is an identity assertion for " +
         "the client only and resource servers will reject it as a Bearer credential."
       );
@@ -765,15 +768,36 @@ async function apiRequest(method, path, { body, requiresAuth = false } = {}) {
 // If there is no access_token, there is nothing a tool can forward.
 // ============================================================
 
-function requireSession() {
-  if (sessionStorage.getItem("access_token")) return null; // AT present — tools can run
+// ── TokenProvider seam ─────────────────────────────────────────
+// One place answers "what credential does this tab act with?", so the three
+// auth modes (see docs/agent-auth-modes-spec.md) differ only in where the
+// token comes from, not in any handler code:
+//   browser mode  — OIDC Auth Code + PKCE redirect (login tool / button)
+//   broker mode   — device-code flow approved out-of-band; token delivered
+//                   via the backend broker (/api/auth/*)
+// Both modes store the result under the same sessionStorage keys today, so
+// this is behavior-preserving; the seam exists so a future broker that holds
+// the token server-side only changes here.
+async function getAccessToken() {
+  const mode = sessionStorage.getItem("agent_auth_mode") || "browser";
+  if (mode === "broker") {
+    // Token was delivered by the backend after device-flow approval
+    // (demo: exchanged once into sessionStorage). Same operative credential.
+    return sessionStorage.getItem("access_token") || null;
+  }
+  return sessionStorage.getItem("access_token");
+}
+
+async function requireSession() {
+  const token = await getAccessToken();
+  if (token) return null; // AT present — tools can run
   return {
     error: "Session required.",
     detail: "The user must sign in before any tool can be used. " +
             "Tools forward the access_token as the Bearer credential to APIs. " +
             "The id_token establishes the UI session and carries identity claims, " +
             "but the access_token is the operative credential for agent tool calls. " +
-            "No separate agent OAuth is needed — the user's existing session token is forwarded.",
+            "Sign in via the login tool (redirect + out-of-band approval) or device_login (device code).",
   };
 }
 
@@ -800,6 +824,156 @@ const LOGIN_TOOL_DESCRIPTOR = {
 // Tool: login — static registration; unregistered once a session exists.
 registerTool("login", LOGIN_TOOL_DESCRIPTOR, loginToolHandler);
 
+// ── Mode C tools: device_login + auth_status ─────────────────
+// See docs/agent-auth-modes-spec.md. For headless/agent-only contexts where
+// the OIDC redirect is unusable (navigation unloads a headless tab). The tab
+// NEVER opens or polls the approval page — the agent relays the user_code and
+// verification_uri to the human, who approves out-of-band; the only waiting
+// primitive here is HTTP polling of /api/auth/status.
+
+// Broker state for the in-flight device flow (request_id is the only handle
+// the tab holds; device_code lives server-side).
+let deviceFlowRequestId = null;
+
+const DEVICE_LOGIN_DESCRIPTOR = {
+  title: "Device Login",
+  description: "Starts a device-code sign-in for headless or agent-only contexts. Returns a user_code and verification_uri — tell the human to open the URI and enter the code, then poll auth_status { request_id } until it returns approved. Only usable when signed out.",
+  parameters: {
+    type: "object",
+    properties: {
+      email: { type: "string", description: "Optional — the user's email address to pin the approval to their account. Ask the user for it in chat." },
+    },
+  },
+  ui: {
+    labels: [{text:"OIDC", cls:"tool-label-api"}, {text:"OOB", cls:"tool-label-auth"}, {text:"DEVICE", cls:"tool-label-mutate"}],
+    desc: "Starts a device-code grant via the backend broker; the human approves at the verification URI out-of-band.",
+    inputs: false,
+  },
+};
+
+async function deviceLoginHandler(args) {
+  const sessionError = await requireSession();
+  if (!sessionError) {
+    return {
+      error: "Already signed in. device_login is only usable when signed out.",
+      code: "ALREADY_SIGNED_IN",
+    };
+  }
+
+  const email = typeof args?.email === "string" ? args.email.trim() : "";
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return { error: "email, when provided, must be a valid address.", code: "EMAIL_INVALID" };
+  }
+
+  let start;
+  try {
+    start = await apiRequest("POST", "/auth/start", { body: email ? { email } : {} });
+  } catch (err) {
+    return { error: `Device-code broker unavailable: ${err.message}`, code: "BROKER_UNAVAILABLE" };
+  }
+
+  deviceFlowRequestId = start.request_id;
+
+  logToolEvent(`[device_login] device flow started — user_code: ${start.user_code}`);
+
+  return {
+    user_code: start.user_code,
+    verification_uri: start.verification_uri,
+    verification_uri_complete: start.verification_uri_complete ?? null,
+    expires_in: start.expires_in,
+    request_id: start.request_id,
+    next_step: `Tell the human to open ${start.verification_uri} and enter code ${start.user_code}. ` +
+      `Then call auth_status { request_id: "${start.request_id}" } — poll it (respecting retry_after) ` +
+      `until it returns approved, then the session is established automatically.`,
+  };
+}
+
+const AUTH_STATUS_DESCRIPTOR = {
+  title: "Auth Status",
+  description: "Without request_id: reports the current tab session ({ signed_in, client_id }). With request_id (from device_login): polls the pending device-code approval — returns pending (with retry_after), approved (session established), expired, or denied.",
+  parameters: {
+    type: "object",
+    properties: {
+      request_id: { type: "string", description: "The request_id returned by device_login. Omit to check the tab's current session." },
+    },
+  },
+  ui: {
+    labels: [{text:"POLL", cls:"tool-label-mutate"}, {text:"AUTH", cls:"tool-label-auth"}],
+    desc: "Polls the device-code broker for approval status, or reports the current session.",
+  },
+};
+
+async function authStatusHandler(args) {
+  const requestId = typeof args?.request_id === "string" ? args.request_id.trim() : (deviceFlowRequestId ?? "");
+
+  // No id: report the tab's current session.
+  if (!requestId) {
+    const token = await getAccessToken();
+    if (!token) {
+      return { signed_in: false, detail: "No session. Use login (redirect) or device_login (device code) to sign in." };
+    }
+    const claims = parseJwt(token) ?? {};
+    return {
+      signed_in: true,
+      client_id: claims.client_id ?? claims.azp ?? null,
+      auth_mode: sessionStorage.getItem("agent_auth_mode") || "browser",
+      expires_at: claims.exp ? new Date(claims.exp * 1000).toISOString() : null,
+    };
+  }
+
+  // With id: proxy the broker status.
+  let status;
+  try {
+    // No Bearer — the request_id is the credential; apiRequest(requiresAuth:false)
+    // still gives allowlist-checked fetch + logging.
+    status = await apiRequest("GET", `/auth/status?request_id=${encodeURIComponent(requestId)}`);
+  } catch (err) {
+    return { error: `Broker status check failed: ${err.message}`, code: "BROKER_UNAVAILABLE" };
+  }
+
+  if (status.status === "approved") {
+    // One-time token pickup, then behave exactly like any other session.
+    try {
+      const token = await apiRequest("POST", "/auth/token", { body: { request_id: requestId } });
+      sessionStorage.setItem("access_token", token.access_token || "");
+      if (token.id_token) {
+        sessionStorage.setItem("id_token", token.id_token);
+        idTokenRaw = token.id_token;
+        idTokenClaims = parseJwt(token.id_token);
+      }
+      sessionStorage.setItem("agent_auth_mode", "broker");
+      deviceFlowRequestId = null;
+      await mountApp();
+      logToolEvent("[device_login] approved — broker session established");
+      return {
+        status: "approved",
+        signed_in: true,
+        auth_mode: "broker",
+        note: "Device flow approved out-of-band. The tab now acts with the device-flow token (agentic client). All store tools are available.",
+      };
+    } catch (err) {
+      return { error: `Approved but token pickup failed: ${err.message}. Re-poll auth_status to retry pickup.`, code: "TOKEN_PICKUP_FAILED" };
+    }
+  }
+
+  if (status.status === "pending") {
+    return {
+      status: "pending",
+      retry_after: status.retry_after ?? 5,
+      detail: "The human has not approved yet. Wait retry_after seconds, then poll again.",
+    };
+  }
+
+  // expired / denied / unknown / error — terminal; clear the pending handle.
+  if (requestId === deviceFlowRequestId) deviceFlowRequestId = null;
+  return { status: status.status, error: status.error, detail: "Terminal state — start a new device_login if needed." };
+}
+
+// Static registration for both Mode C tools; unregistered in mountApp()
+// alongside login once a session exists.
+registerTool("device_login", DEVICE_LOGIN_DESCRIPTOR, deviceLoginHandler);
+registerTool("auth_status", AUTH_STATUS_DESCRIPTOR, authStatusHandler);
+
 // ── Store tools ──────────────────────────────────────────────
 // Defined here but registered in mountApp() once a session exists, so the
 // initial page exposes only the login tool (spec: register tools when they
@@ -818,7 +992,7 @@ const VIEW_PRODUCTS_DESCRIPTOR = {
 };
 
 async function viewProductsHandler() {
-  const sessionError = requireSession();
+  const sessionError = await requireSession();
   if (sessionError) return sessionError;
   const data = await apiRequest("GET", "/products.json");
   if (data?.products) {
@@ -849,7 +1023,7 @@ const ADD_TO_CART_DESCRIPTOR = {
 };
 
 async function addToCartHandler({ product_id, quantity }) {
-  const sessionError = requireSession();
+  const sessionError = await requireSession();
   if (sessionError) return sessionError;
   const product = PRODUCTS.find(p => p.id === product_id);
   if (!product) {
@@ -878,7 +1052,7 @@ const VIEW_CART_DESCRIPTOR = {
 };
 
 async function viewCartHandler() {
-  const sessionError = requireSession();
+  const sessionError = await requireSession();
   if (sessionError) return sessionError;
   return {
     ...cartSummary(),
@@ -921,7 +1095,7 @@ const REMOVE_FROM_CART_DESCRIPTOR = {
 };
 
 async function removeFromCartHandler({ product_id }) {
-  const sessionError = requireSession();
+  const sessionError = await requireSession();
   if (sessionError) return sessionError;
   if (!cart[product_id]) {
     return { error: `Product "${product_id}" is not in the cart.` };
@@ -945,7 +1119,7 @@ const CHECKOUT_DESCRIPTOR = {
 };
 
 async function checkoutHandler(args, executeOptions) {
-    const sessionError = requireSession();
+    const sessionError = await requireSession();
     if (sessionError) return sessionError;
 
     if (Object.keys(cart).length === 0) {
@@ -1804,11 +1978,20 @@ document.getElementById("btn-login").addEventListener("click", startLogin);
 
 document.getElementById("btn-logout").addEventListener("click", () => {
   const apiBase = sessionStorage.getItem("apiBase"); // preserve across logout if set
+  const wasBroker = (sessionStorage.getItem("agent_auth_mode") || "browser") === "broker";
   sessionStorage.clear();
   if (apiBase) sessionStorage.setItem("apiBase", apiBase);
   idTokenClaims = null;
   idTokenRaw = null;
   cart = {};
+
+  if (wasBroker) {
+    // Broker-mode sessions have no AS cookie in this tab (the approval happened
+    // out-of-band) — there is nothing to sign off at PingOne. Reload to the
+    // signed-out page; the device-flow token is discarded with sessionStorage.
+    window.location.href = window.location.pathname;
+    return;
+  }
 
   // PingOne end_session (best-effort, then redirect to login)
   const endSession = `${CONFIG.PINGONE_AS_BASE}/signoff?post_logout_redirect_uri=${encodeURIComponent(CONFIG.PINGONE_REDIRECT_URI)}`;
@@ -1879,6 +2062,14 @@ async function mountApp() {
   if (toolRegistry.login) {
     unregisterTool("login");
     logToolEvent("[tools] login unregistered — session established");
+  }
+
+  // Mode C tools only make sense signed-out.
+  for (const name of ["device_login", "auth_status"]) {
+    if (toolRegistry[name]) {
+      unregisterTool(name);
+      logToolEvent(`[tools] ${name} unregistered — session established`);
+    }
   }
 
   // Session is active — the store tools become available.

@@ -27,6 +27,12 @@ spec:
               value: "3000"
             - name: ALLOWED_ORIGIN
               value: "https://cprice-ping.github.io"
+            - name: AGENTIC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: shopapi-secrets
+                  key: AGENTIC_CLIENT_ID
+                  optional: true
           # Secret env vars — sourced from the Secret
           envFrom:
             - secretRef:

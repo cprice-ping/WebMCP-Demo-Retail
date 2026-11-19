@@ -10,6 +10,7 @@ import express from "express";
 import cors from "cors";
 import productsRouter from "./routes/products.js";
 import checkoutRouter from "./routes/checkout.js";
+import authRouter from "./routes/auth.js";
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -41,6 +42,7 @@ app.use(express.json());
 app.use("/api/products", productsRouter);
 app.use("/api/products.json", productsRouter);
 app.use("/api/checkout", checkoutRouter);
+app.use("/api/auth", authRouter);
 
 // Health / readiness probe (used by k8s liveness/readiness)
 app.get("/health", (_req, res) => res.json({ ok: true }));
