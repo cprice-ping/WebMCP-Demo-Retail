@@ -35,6 +35,8 @@ Browser
 ├── styles.css          All styling
 ├── config.js           PingOne OIDC + API configuration
 ├── app.js              Everything: OIDC flow, WebMCP registration, tools, UI logic
+├── vendor/
+│   └── webmcp-polyfill.js  W3C WebMCP polyfill (@w3c/webmcp-polyfill 0.1.1, Apache-2.0)
 └── api/
     └── products.json   Product catalog (source of truth — includes emoji, price, description)
 ```
@@ -214,10 +216,13 @@ Each log entry includes:
 
 ## WebMCP Registration
 
-Tools register via `document.modelContext.registerTool()` per the [current spec](https://webmachinelearning.github.io/webmcp/). On page load the app:
+Tools register via `document.modelContext.registerTool()` per the [current spec](https://webmachinelearning.github.io/webmcp/). Browsers without native WebMCP get `document.modelContext` from the [W3C WebMCP polyfill](https://github.com/w3c-oss/webmcp-polyfill), vendored at `vendor/webmcp-polyfill.js` and loaded before `app.js`. The polyfill never replaces a native implementation, so the app has a single, spec-shaped code path in every browser.
 
-1. Installs a shim on `document.modelContext` if the browser doesn't natively support it (tools stay callable from the UI either way)
-2. Retries native registration every 500ms for up to 10 seconds, in case the browser exposes `document.modelContext` after page scripts run (e.g. flag toggled mid-session)
+What the polyfill does and doesn't give you:
+
+- **Does:** the full page-side API (`registerTool`, `getTools`, `executeTool`, `toolchange`/`toolactivated`/`toolcancel`) in any secure context (HTTPS or `localhost`). You can call the page's tools from DevTools with `document.modelContext.getTools()` / `executeTool()`.
+- **Doesn't:** connect the page to a browser agent. External agents still need native support (e.g. Chrome's WebMCP flag) or an extension.
+- **Load order caveat:** the polyfill installs synchronously, so anything that injects `document.modelContext` *after* page scripts run will find it already present. Native browser support is unaffected.
 
 The registration uses the current spec form — `registerTool(tool, options)` with an `AbortSignal` in options so dynamic tools (checkout, remove_from_cart) can be unregistered spec-compliantly by aborting the signal:
 

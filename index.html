@@ -314,6 +314,9 @@
        SCRIPTS
   ============================================================ -->
   <script src="https://apps.pingone.com/signals/web-sdk/5.6.0/signals-sdk.js" defer></script>
+  <!-- W3C WebMCP polyfill (@w3c/webmcp-polyfill 0.1.1): provides
+       document.modelContext where the browser doesn't. Must load before app.js. -->
+  <script src="vendor/webmcp-polyfill.js"></script>
   <script src="config.js"></script>
   <script src="ag-ui-client.js"></script>
   <script src="app.js"></script>
