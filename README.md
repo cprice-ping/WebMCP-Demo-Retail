@@ -384,6 +384,16 @@ Condition: `Request.otpCode` is present **AND** `Request.deviceAuthenticationId`
 
 Effect: Use `Request.deviceAuthenticationId` + `Request.otpCode` to call PingOne MFA verify. If the OTP is valid → `PERMIT`. If invalid → `DENY`.
 
+### Statement codes — the policy ↔ tool contract
+
+The statement `code` in an advice payload is the contract between policy authors and this app's tool layer: the server forwards payloads as-is, the client dispatches on the code (`app.js` checkout agent path). Codes the tool handles today:
+
+| Code | Tool behavior |
+|---|---|
+| `deny-stepup` (with payload) | Stashes cart, returns `{challenge: "STEP_UP_REQUIRED"}`, tab navigates to the OOB flow; agent re-calls checkout after fresh auth_time |
+
+**Authoring rule of thumb:** a statement *without* a payload is treated as a **plain DENY** (403, terminal answer, session survives). Interactive statements redirect the tab — **never attach step-up statements to rules matching headless sessions** (`Request.clientId` = the headless client): a headless tab has no human watching it, and the redirect destroys the agent's session mid-task. Headless denial should always be plain DENY. If a headless-verifiable statement code is added later (e.g. email-OTP relayed by the agent in chat), handle it in the client dispatch before using it in policy.
+
 ### Worker Application
 
 The server uses a separate **Worker (M2M) Application** — not the browser PKCE client — to call the decision endpoint. It requires:
