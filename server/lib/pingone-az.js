@@ -90,8 +90,10 @@ function maskSubject(sub) {
 /**
  * Obtain (or return cached) a client_credentials token for the Worker app.
  * Refreshes automatically when fewer than 60 seconds remain.
+ * Exported for reuse by the CIBA auth broker (routes/auth.js) — the same
+ * worker credential authenticates bc-authorize and its token polling.
  */
-async function getWorkerToken() {
+export async function getWorkerToken() {
   const nowSec = Math.floor(Date.now() / 1000);
   if (_workerToken && _workerToken.exp > nowSec + 180) {
     return _workerToken.token;

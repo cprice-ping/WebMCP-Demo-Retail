@@ -141,6 +141,14 @@ User clicks "Sign In"
   → mountApp()    calls invokeTool("view_products") to bootstrap the UI
 ```
 
+**Three login paths, one app** (see `docs/agent-auth-modes-spec.md`):
+
+1. **Human** — the Sign In button (main client). Human + sidecar agent share this session.
+2. **Agent-initiated, browser present** — the `login` tool (agentic client): the tab navigates to the OOB HILT flow, the user approves on their device, the app returns signed in.
+3. **Agent-only / headless** — the `ciba_login` tool (agentic client, **CIBA**): the backend broker calls `/bc-authorize`, PingOne pushes an approval request to the person's device (email is required — it targets the person), the person approves, the broker exchanges `auth_req_id` for tokens and hands them to the tab once. No redirect, no code to type — the human's whole experience is a notification they approve. The tab polls `auth_status`; that is its only waiting primitive.
+
+All three land in the same `TokenProvider` seam (`getAccessToken()` + `agent_auth_mode`); everything downstream — tools, checkout, P1AZ — is mode-agnostic and keys on the token's `client_id`.
+
 **Silent refresh.** On page load, if the `access_token` is expired, `startSilentLogin()` sends `prompt=none` to the AS. If the AS session cookie is still valid, fresh tokens are issued without showing UI. If not, `error=login_required` is returned and the user sees the login screen.
 
 **Token usage:**

@@ -1,66 +1,50 @@
 // ============================================================
-// Device-code auth broker — Mode C (Agent-only / headless)
+// CIBA auth broker — Mode C (Agent-only / headless)
 // See docs/agent-auth-modes-spec.md
 //
-// The browser tab cannot run the OIDC redirect flow when it is headless
-// (navigation unloads it, and rendering/polling the DaVinci approval page
-// in-tab previously OOM-killed the headless browser). Instead the tab's
-// agent asks this broker to start a device-code grant (RFC 8628); the HUMAN
-// approves out-of-band (visits verification_uri, enters user_code), and the
-// tab polls the broker until the token lands.
+// The headless tab has no UX to run an OIDC redirect (navigation unloads it)
+// and device code failed in practice: the human has to be TOLD a code and a
+// URL by the agent, and the tab-side polling had nothing to show for it.
+// CIBA (Client-Initiated Backchannel Authentication, OpenID FAPI CIBA) is
+// the right shape for an agent-only session: the tab's agent asks the AS
+// (via this broker) to authenticate the person, and the AS *pushes* the
+// approval to the person's device. The human's entire experience is a
+// notification they approve. The agent only polls.
 //
-// Flow:
-//   tab → POST /api/auth/start        → { request_id, user_code, verification_uri, ... }
-//   agent relays user_code + verification_uri to the human
-//   human approves at verification_uri (device code page on agentic client)
-//   server polls PingOne /token in the background with proper backoff
-//   tab → GET  /api/auth/status       → { status: "pending" | "approved" | ... }
-//   tab → POST /api/auth/token (once) → { access_token, ... } (then deleted)
+// Flow (RFC: OpenID Client-Initiated Backchannel Authentication):
+//   agent → device_login { email }           (login_hint is CIBA-mandatory —
+//                                             the person must be identified)
+//         → POST /api/auth/start             → broker → POST {as}/bc-authorize
+//                                             → { auth_req_id, expires_in, interval }
+//   PingOne pushes the approval to the person's device (PingOne Verify push /
+//   whatever the agentic client's CIBA flow defines)
+//   agent → auth_status { request_id }       → broker polls {as}/token with
+//                                             grant_type=urn:openid:params:grant-type:ciba
+//                                             → pending | approved | denied | expired
+//   approved → one-time POST /api/auth/token → tokens into sessionStorage
+//   Tab behaves exactly like Mode A/B from there (TokenProvider seam).
 //
 // Security notes:
-//   - device_code never leaves the server; the tab only holds request_id.
-//   - request_id is a high-entropy random handle (not guessable).
-//   - The one-time token exchange (demo convenience) deletes the stored
-//     token on read. Production keeps it server-side and proxies calls.
-//   - In-memory store — single-instance demo only. Note for k8s: replicas
-//     would need a shared store.
+//   - auth_req_id never leaves the server; the tab only holds request_id.
+//   - CIBA requires client authentication: the broker authenticates with the
+//     Worker app (AZ_CLIENT_ID/AZ_CLIENT_SECRET, client_secret_basic) — the
+//     same credential infrastructure as the P1AZ decision endpoint. The
+//     agentic PKCE client is identified by `Request` param login_hint target /
+//     pingone_msg params, NOT by a browser-held secret.
+//   - request_id is a high-entropy random handle.
+//   - In-memory store — single-instance demo only.
 // ============================================================
 
 import { Router } from "express";
 import { randomUUID } from "crypto";
+import { getWorkerToken } from "../lib/pingone-az.js";
 
 const router = Router();
 
-const P1_BASE = process.env.PINGONE_AS_BASE ||
-  (process.env.PINGONE_ENVIRONMENT_ID
-    ? `https://auth.pingone.com/${process.env.PINGONE_ENVIRONMENT_ID}/as`
-    : null);
-
-const AGENTIC_CLIENT_ID = process.env.AGENTIC_CLIENT_ID ||
-  process.env.PINGONE_AGENTIC_CLIENT_ID || ""; // alias for local parity with config.js
-
-// Derived per-request (env may load after module import in some runtimes).
-function pingOneBase() {
-  return process.env.PINGONE_AS_BASE ||
-    (process.env.PINGONE_ENVIRONMENT_ID
-      ? `https://auth.pingone.com/${process.env.PINGONE_ENVIRONMENT_ID}/as`
-      : null);
-}
-
-function agenticClientId() {
-  return process.env.AGENTIC_CLIENT_ID ||
-    process.env.PINGONE_AGENTIC_CLIENT_ID || "";
-}
-
-const DEVICE_SCOPE = "openid profile email";
-
-// request_id → { device_code, user_code, verification_uri, interval, expires_at,
-//                state: "pending"|"approved"|"consumed"|"expired"|"denied",
-//                token?: {access_token, ...}, error?: string }
+// request_id → { auth_req_id, interval, expires_at, state, token, error, nextPollAt }
 const pendingRequests = new Map();
 
-const REQUEST_TTL_MS     = 10 * 60 * 1000; // PingOne default device-code lifetime
-const TOKEN_RETENTION_MS = 5 * 60 * 1000;  // how long an approved token waits for pickup
+const TOKEN_RETENTION_MS = 5 * 60 * 1000; // how long an approved token waits for pickup
 
 function pruneExpired() {
   const now = Date.now();
@@ -74,77 +58,98 @@ function maskSubject(sub) {
   return `${sub.slice(0, 8)}…(${sub.length})`;
 }
 
-// ── 1. Start a device authorization ─────────────────────────
+function pingOneBase() {
+  return process.env.PINGONE_AS_BASE ||
+    (process.env.PINGONE_ENVIRONMENT_ID
+      ? `https://auth.pingone.com/${process.env.PINGONE_ENVIRONMENT_ID}/as`
+      : null);
+}
+
+function agenticClientId() {
+  return process.env.AGENTIC_CLIENT_ID ||
+    process.env.PINGONE_AGENTIC_CLIENT_ID || "";
+}
+
+// ── 1. Start a CIBA backchannel authorization ───────────────
 router.post("/start", async (req, res) => {
   pruneExpired();
 
   if (!pingOneBase() || !agenticClientId()) {
     return res.status(503).json({
-      error: "Device-code broker not configured.",
-      detail: "Set PINGONE_ENVIRONMENT_ID (or PINGONE_AS_BASE) and AGENTIC_CLIENT_ID; the agentic app must have the device-code grant enabled.",
+      error: "CIBA broker not configured.",
+      detail: "Set PINGONE_ENVIRONMENT_ID (or PINGONE_AS_BASE), AGENTIC_CLIENT_ID, and the AZ worker credentials; the agentic app must have CIBA enabled in PingOne.",
     });
   }
 
-  // Optional person-pinning hint — forwarded as login_hint to the device page.
+  // login_hint is REQUIRED in CIBA — the AS pushes to a specific person; there
+  // is no code for the human to type, so the identity must be pinned up front.
   const email = typeof req.body?.email === "string" ? req.body.email.trim() : "";
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return res.status(400).json({ error: "email must be a valid address when provided." });
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({
+      error: "A valid email (login_hint) is required for CIBA.",
+      detail: "CIBA pushes the approval to a specific person's device — ask the user for their account email address first.",
+      code: "LOGIN_HINT_REQUIRED",
+    });
   }
 
   try {
-    const body = new URLSearchParams({
-      client_id: agenticClientId(),
-      scope: DEVICE_SCOPE,
-    });
-    if (email) body.set("login_hint", email);
+    // PingOne CIBA: bc-authorize authenticated with a Worker app token
+    // (the agentic PKCE client's identity rides in pingone_msg / login_hint
+    // parameters per PingOne's CIBA configuration — see README setup).
+    const workerToken = await getWorkerToken();
 
-    const resp = await fetch(`${pingOneBase()}/device_authorization`, {
+    const body = new URLSearchParams({
+      client_id:       agenticClientId(),
+      scope:           "openid profile email",
+      login_hint:      email,
+      binding_message: "WebMCP sign-in",
+    });
+
+    const resp = await fetch(`${pingOneBase()}/bc-authorize`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type":  "application/x-www-form-urlencoded",
+        "Authorization": `Bearer ${workerToken}`,
+      },
       body: body.toString(),
     });
 
     const data = await resp.json();
     if (!resp.ok) {
-      console.warn(`[auth] device_authorization failed: ${resp.status} ${JSON.stringify(data).slice(0, 300)}`);
+      console.warn(`[auth] bc-authorize failed: ${resp.status} ${JSON.stringify(data).slice(0, 300)}`);
       return res.status(502).json({
-        error: "PingOne rejected the device authorization request.",
-        detail: data.error ?? data.message ?? `HTTP ${resp.status}`,
+        error: "PingOne rejected the CIBA backchannel authorization.",
+        detail: data.error_description ?? data.error ?? data.message ?? `HTTP ${resp.status}`,
       });
     }
 
     const requestId = randomUUID();
     const interval  = Number(data.interval) || 5;
-    const expiresIn = Number(data.expires_in) || 600;
+    const expiresIn = Number(data.expires_in) || 300;
 
     pendingRequests.set(requestId, {
-      device_code:      data.device_code,
-      user_code:        data.user_code,
-      verification_uri: data.verification_uri,
-      verification_uri_complete: data.verification_uri_complete ?? null,
+      auth_req_id: data.auth_req_id,
       interval,
       expires_at: Date.now() + expiresIn * 1000,
       state: "pending",
       token: null,
       error: null,
-      // Polling clock (server-side): next allowed /token attempt
       nextPollAt: 0,
     });
 
-    console.log(`[auth] device auth started — request_id: ${requestId}, user_code: ${data.user_code}`);
+    console.log(`[auth] CIBA started — request_id: ${requestId}, login_hint: ${email}`);
 
-    // device_code is NEVER returned to the client.
+    // auth_req_id is NEVER returned to the client.
     return res.json({
-      request_id:       requestId,
-      user_code:        data.user_code,
-      verification_uri: data.verification_uri,
-      verification_uri_complete: data.verification_uri_complete ?? null,
-      expires_in:       expiresIn,
+      request_id: requestId,
+      login_hint: email,
+      expires_in: expiresIn,
       interval,
+      detail: "An approval request is being pushed to the person's device. Poll /status.",
     });
   } catch (err) {
     console.error(`[auth] start error: ${err.message}`);
-    return res.status(502).json({ error: "Could not reach PingOne device authorization endpoint.", detail: err.message });
+    return res.status(502).json({ error: "Could not reach PingOne CIBA endpoint.", detail: err.message });
   }
 });
 
@@ -166,32 +171,34 @@ router.get("/status", async (req, res) => {
     return res.json({ status: entry.state, error: entry.error ?? undefined });
   }
 
-  // Respect the slow_down backoff clock PingOne gave us.
+  // Respect the interval the AS gave us (CIBA polling discipline).
   if (now < entry.nextPollAt) {
     return res.json({ status: "pending", retry_after: Math.ceil((entry.nextPollAt - now) / 1000) });
   }
 
   try {
+    const workerToken = await getWorkerToken();
+
     const body = new URLSearchParams({
-      grant_type:    "urn:ietf:params:oauth:grant-type:device_code",
-      device_code:   entry.device_code,
-      client_id:     agenticClientId(),
+      grant_type:  "urn:openid:params:grant-type:ciba",
+      auth_req_id: entry.auth_req_id,
     });
 
     const resp = await fetch(`${pingOneBase()}/token`, {
       method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      headers: {
+        "Content-Type":  "application/x-www-form-urlencoded",
+        "Authorization": `Bearer ${workerToken}`,
+      },
       body: body.toString(),
     });
 
     const data = await resp.json();
 
     if (resp.ok && data.access_token) {
-      // Approved — store server-side, hand out only status. Token pickup is
-      // a separate one-time call.
       entry.state = "approved";
       entry.token = data;
-      console.log(`[auth] device flow approved — request_id: ${requestId}, sub: ${maskSubject(data.id_token ? decodeSub(data.id_token) : null)}`);
+      console.log(`[auth] CIBA approved — request_id: ${requestId}, sub: ${maskSubject(data.id_token ? decodeSub(data.id_token) : null)}`);
       return res.json({ status: "approved", expires_in: data.expires_in ?? undefined });
     }
 
@@ -213,14 +220,12 @@ router.get("/status", async (req, res) => {
       return res.json({ status: "denied" });
     }
 
-    // Unexpected error — surface as terminal so the tab doesn't spin forever.
-    console.warn(`[auth] unexpected token error: ${data.error ?? resp.status}`);
+    console.warn(`[auth] unexpected CIBA token error: ${data.error ?? resp.status}`);
     entry.state = "error";
     entry.error = data.error_description ?? data.error ?? `HTTP ${resp.status}`;
     return res.json({ status: "error", error: entry.error });
   } catch (err) {
     console.error(`[auth] status poll error: ${err.message}`);
-    // Network hiccup — stay pending; the tab will re-poll.
     return res.json({ status: "pending", retry_after: entry.interval });
   }
 });
@@ -248,8 +253,6 @@ router.post("/token", (req, res) => {
     return res.status(409).json({ error: `Token not ready — status: ${entry.state}.` });
   }
 
-  // One-time: hand over and delete. Production keeps it server-side and
-  // proxies tool calls instead (out of scope for the demo).
   const token = entry.token;
   entry.token = null;
   entry.state = "consumed";

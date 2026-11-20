@@ -763,7 +763,7 @@ async function requireSession() {
             "Tools forward the access_token as the Bearer credential to APIs. " +
             "The id_token establishes the UI session and carries identity claims, " +
             "but the access_token is the operative credential for agent tool calls. " +
-            "Sign in via the login tool (redirect + out-of-band approval) or device_login (device code).",
+            "Sign in via the login tool (redirect + out-of-band approval) or ciba_login (push approval to the user's device).",
   };
 }
 
@@ -790,93 +790,100 @@ const LOGIN_TOOL_DESCRIPTOR = {
 // Tool: login — static registration; unregistered once a session exists.
 registerTool("login", LOGIN_TOOL_DESCRIPTOR, loginToolHandler);
 
-// ── Mode C tools: device_login + auth_status ─────────────────
+// ── Mode C tools: ciba_login + auth_status ──────────────────
 // See docs/agent-auth-modes-spec.md. For headless/agent-only contexts where
-// the OIDC redirect is unusable (navigation unloads a headless tab). The tab
-// NEVER opens or polls the approval page — the agent relays the user_code and
-// verification_uri to the human, who approves out-of-band; the only waiting
-// primitive here is HTTP polling of /api/auth/status.
+// the OIDC redirect is unusable (navigation unloads a headless tab) and where
+// device code failed in practice (the human has to be TOLD a code and URL).
+// CIBA inverts the burden: the AS pushes the approval to the person's device
+// (PingOne Verify push); the human's whole experience is a notification they
+// approve. The tab NEVER opens any approval page — the only waiting primitive
+// here is HTTP polling of /api/auth/status.
 
-// Broker state for the in-flight device flow (request_id is the only handle
-// the tab holds; device_code lives server-side).
-let deviceFlowRequestId = null;
+// Broker state for the in-flight CIBA flow (request_id is the only handle the
+// tab holds; auth_req_id lives server-side).
+let cibaRequestId = null;
 
-const DEVICE_LOGIN_DESCRIPTOR = {
-  title: "Device Login",
-  description: "Starts a device-code sign-in for headless or agent-only contexts. Returns a user_code and verification_uri — tell the human to open the URI and enter the code, then poll auth_status { request_id } until it returns approved. Only usable when signed out.",
+const CIBA_LOGIN_DESCRIPTOR = {
+  title: "CIBA Login",
+  description: "Starts a CIBA (backchannel) sign-in for headless or agent-only contexts. The authorization server pushes an approval request to the person's device (e.g. a push notification they approve). email is REQUIRED — it identifies whose device receives the approval. After calling this, poll auth_status { request_id } until it returns approved. Only usable when signed out.",
   parameters: {
     type: "object",
     properties: {
-      email: { type: "string", description: "Optional — the user's email address to pin the approval to their account. Ask the user for it in chat." },
+      email: { type: "string", description: "The user's email address — REQUIRED. Ask the user for it in chat; the approval request is pushed to that person's device." },
     },
+    required: ["email"],
   },
   ui: {
-    labels: [{text:"OIDC", cls:"tool-label-api"}, {text:"OOB", cls:"tool-label-auth"}, {text:"DEVICE", cls:"tool-label-mutate"}],
-    desc: "Starts a device-code grant via the backend broker; the human approves at the verification URI out-of-band.",
+    labels: [{text:"OIDC", cls:"tool-label-api"}, {text:"OOB", cls:"tool-label-auth"}, {text:"CIBA", cls:"tool-label-mutate"}],
+    desc: "Starts a CIBA backchannel auth via the backend broker; the approval is pushed to the person's device.",
     inputs: false,
   },
 };
 
-async function deviceLoginHandler(args) {
+async function cibaLoginHandler(args) {
   const sessionError = await requireSession();
   if (!sessionError) {
     return {
-      error: "Already signed in. device_login is only usable when signed out.",
+      error: "Already signed in. ciba_login is only usable when signed out.",
       code: "ALREADY_SIGNED_IN",
     };
   }
 
+  // CIBA is person-targeted: no login_hint, no push, no session.
   const email = typeof args?.email === "string" ? args.email.trim() : "";
-  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    return { error: "email, when provided, must be a valid address.", code: "EMAIL_INVALID" };
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return {
+      error: "A valid email parameter is required — the approval request is pushed to that person's device. Ask the user for their account email address, then call this tool again.",
+      code: "EMAIL_REQUIRED",
+    };
   }
 
   let start;
   try {
-    start = await apiRequest("POST", "/auth/start", { body: email ? { email } : {} });
+    start = await apiRequest("POST", "/auth/start", { body: { email } });
   } catch (err) {
-    return { error: `Device-code broker unavailable: ${err.message}`, code: "BROKER_UNAVAILABLE" };
+    return { error: `CIBA broker unavailable: ${err.message}`, code: "BROKER_UNAVAILABLE" };
+  }
+  if (start?.error) {
+    return { error: start.error, detail: start.detail, code: start.code ?? "CIBA_START_FAILED" };
   }
 
-  deviceFlowRequestId = start.request_id;
+  cibaRequestId = start.request_id;
 
-  logToolEvent(`[device_login] device flow started — user_code: ${start.user_code}`);
+  logToolEvent(`[ciba_login] backchannel auth started for ${email}`);
 
   return {
-    user_code: start.user_code,
-    verification_uri: start.verification_uri,
-    verification_uri_complete: start.verification_uri_complete ?? null,
-    expires_in: start.expires_in,
     request_id: start.request_id,
-    next_step: `Tell the human to open ${start.verification_uri} and enter code ${start.user_code}. ` +
+    expires_in: start.expires_in,
+    next_step: `An approval request has been pushed to ${email}'s device. Tell the human to check their device (e.g. approve the notification in their authenticator app). ` +
       `Then call auth_status { request_id: "${start.request_id}" } — poll it (respecting retry_after) ` +
-      `until it returns approved, then the session is established automatically.`,
+      `until it returns approved; the session is established automatically.`,
   };
 }
 
 const AUTH_STATUS_DESCRIPTOR = {
   title: "Auth Status",
-  description: "Without request_id: reports the current tab session ({ signed_in, client_id }). With request_id (from device_login): polls the pending device-code approval — returns pending (with retry_after), approved (session established), expired, or denied.",
+  description: "Without request_id: reports the current tab session ({ signed_in, client_id }). With request_id (from ciba_login): polls the pending CIBA approval — returns pending (with retry_after), approved (session established), expired, or denied.",
   parameters: {
     type: "object",
     properties: {
-      request_id: { type: "string", description: "The request_id returned by device_login. Omit to check the tab's current session." },
+      request_id: { type: "string", description: "The request_id returned by ciba_login. Omit to check the tab's current session." },
     },
   },
   ui: {
     labels: [{text:"POLL", cls:"tool-label-mutate"}, {text:"AUTH", cls:"tool-label-auth"}],
-    desc: "Polls the device-code broker for approval status, or reports the current session.",
+    desc: "Polls the CIBA broker for approval status, or reports the current session.",
   },
 };
 
 async function authStatusHandler(args) {
-  const requestId = typeof args?.request_id === "string" ? args.request_id.trim() : (deviceFlowRequestId ?? "");
+  const requestId = typeof args?.request_id === "string" ? args.request_id.trim() : (cibaRequestId ?? "");
 
   // No id: report the tab's current session.
   if (!requestId) {
     const token = await getAccessToken();
     if (!token) {
-      return { signed_in: false, detail: "No session. Use login (redirect) or device_login (device code) to sign in." };
+      return { signed_in: false, detail: "No session. Use login (redirect + out-of-band approval) or ciba_login (push approval) to sign in." };
     }
     const claims = parseJwt(token) ?? {};
     return {
@@ -908,9 +915,9 @@ async function authStatusHandler(args) {
         idTokenClaims = parseJwt(token.id_token);
       }
       sessionStorage.setItem("agent_auth_mode", "broker");
-      deviceFlowRequestId = null;
+      cibaRequestId = null;
       await mountApp();
-      logToolEvent("[device_login] approved — broker session established");
+      logToolEvent("[ciba_login] approved — broker session established");
       return {
         status: "approved",
         signed_in: true,
@@ -931,13 +938,13 @@ async function authStatusHandler(args) {
   }
 
   // expired / denied / unknown / error — terminal; clear the pending handle.
-  if (requestId === deviceFlowRequestId) deviceFlowRequestId = null;
-  return { status: status.status, error: status.error, detail: "Terminal state — start a new device_login if needed." };
+  if (requestId === cibaRequestId) cibaRequestId = null;
+  return { status: status.status, error: status.error, detail: "Terminal state — start a new ciba_login if needed." };
 }
 
 // Static registration for both Mode C tools; unregistered in mountApp()
 // alongside login once a session exists.
-registerTool("device_login", DEVICE_LOGIN_DESCRIPTOR, deviceLoginHandler);
+registerTool("ciba_login", CIBA_LOGIN_DESCRIPTOR, cibaLoginHandler);
 registerTool("auth_status", AUTH_STATUS_DESCRIPTOR, authStatusHandler);
 
 // ── Store tools ──────────────────────────────────────────────
@@ -2031,7 +2038,7 @@ async function mountApp() {
   }
 
   // Mode C tools only make sense signed-out.
-  for (const name of ["device_login", "auth_status"]) {
+  for (const name of ["ciba_login", "auth_status", "device_login"]) {  // device_login: legacy cleanup
     if (toolRegistry[name]) {
       unregisterTool(name);
       logToolEvent(`[tools] ${name} unregistered — session established`);
