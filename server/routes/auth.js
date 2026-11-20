@@ -119,7 +119,9 @@ router.post("/start", async (req, res) => {
     const body = new URLSearchParams({
       scope:           "openid profile email",
       login_hint:      email,
-      binding_message: "WebMCP sign-in",
+      // PingOne caps binding_message at 8 chars — keep it short and scannable
+      // (it's what the person compares against the push notification).
+      binding_message: "WebMCP",
     });
 
     const resp = await fetch(`${pingOneBase()}/cibaAuthorization`, {
