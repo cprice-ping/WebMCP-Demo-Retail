@@ -145,7 +145,7 @@ User clicks "Sign In"
 
 1. **Human** — the Sign In button (main client). Human + sidecar agent share this session.
 2. **Agent-initiated, browser present** — the `login` tool (agentic client): the tab navigates to the OOB HILT flow, the user approves on their device, the app returns signed in.
-3. **Agent-only / headless** — the `ciba_login` tool (agentic client, **CIBA**): the backend broker calls `/as/cibaAuthorization`, PingOne pushes an approval request to the person's device (email is required — it targets the person), the person approves, the broker exchanges `auth_req_id` for tokens and hands them to the tab once. No redirect, no code to type — the human's whole experience is a notification they approve. The tab polls `auth_status`; that is its only waiting primitive.
+3. **Agent-only / headless** — the `ciba_login` tool (agentic client, **CIBA**): the backend broker calls `/as/cibaAuthorization`, authenticated with the headless app's own `client_secret_basic` (standard OAuth client auth — no worker token; the secret can only initiate backchannel requests, no token issues without the person approving the push), PingOne pushes an approval request to the person's device (email is required — it targets the person), the person approves, the broker exchanges `auth_req_id` for tokens and hands them to the tab once. No redirect, no code to type — the human's whole experience is a notification they approve. The tab polls `auth_status`; that is its only waiting primitive.
 
 All three land in the same `TokenProvider` seam (`getAccessToken()` + `agent_auth_mode`); everything downstream — tools, checkout, P1AZ — is mode-agnostic and keys on the token's `client_id`.
 
@@ -391,7 +391,16 @@ The server uses a separate **Worker (M2M) Application** — not the browser PKCE
 - **Auth method:** Client Secret Basic
 - **Permission:** access to the Decision Endpoints API
 
-Credentials are passed via `AZ_CLIENT_ID` / `AZ_CLIENT_SECRET` env vars and never leave the server.
+Credentials are passed via `AZ_CLIENT_ID` / `AZ_CLIENT_SECRET` env vars and never leave the server. The CIBA broker does **not** use this credential — it authenticates with the headless app's own secret (see the login paths above).
+
+### Headless Application (Mode C)
+
+The headless agentic app must be **confidential** (holds a secret) with:
+- **Token endpoint auth method:** Client Secret Basic
+- **Grant type:** CIBA
+- **Flow policy:** mapped to the push-approval DaVinci flow
+
+Credentials are passed via `HEADLESS_CLIENT_ID` / `HEADLESS_CLIENT_SECRET` env vars. The secret only authorizes *initiating* backchannel requests — no token is issued without the person approving the push on their device.
 
 ---
 

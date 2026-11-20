@@ -27,17 +27,19 @@
 // Security notes:
 //   - auth_req_id never leaves the server; the tab only holds request_id.
 //   - CIBA requires client authentication: the broker authenticates with the
-//     Worker app (AZ_CLIENT_ID/AZ_CLIENT_SECRET, client_secret_basic) — the
-//     same credential infrastructure as the P1AZ decision endpoint. The
-//     agentic PKCE client is identified by `Request` param login_hint target /
-//     pingone_msg params, NOT by a browser-held secret.
+//     HEADLESS app's own credentials (HEADLESS_CLIENT_ID/HEADLESS_CLIENT_SECRET,
+//     client_secret_basic) — the standard OAuth client auth for the CIBA grant,
+//     same method on both /cibaAuthorization and the /token poll. The secret
+//     can only initiate backchannel requests; no token is issued without the
+//     person approving the push, so its blast radius is push-spam to an
+//     arbitrary login_hint — inherent to any CIBA client secret. (The AZ
+//     Worker credential stays dedicated to the decision endpoint.)
 //   - request_id is a high-entropy random handle.
 //   - In-memory store — single-instance demo only.
 // ============================================================
 
 import { Router } from "express";
 import { randomUUID } from "crypto";
-import { getWorkerToken } from "../lib/pingone-az.js";
 
 const router = Router();
 
@@ -75,14 +77,26 @@ function headlessClientId() {
     process.env.PINGONE_AGENTIC_CLIENT_ID || "";
 }
 
+function headlessClientSecret() {
+  return process.env.HEADLESS_CLIENT_SECRET || "";
+}
+
+// Standard OAuth client_secret_basic header for the headless app — used on
+// both /cibaAuthorization and the CIBA /token poll (PingOne requires the same
+// client auth method throughout the flow).
+function clientAuthHeader() {
+  const cred = Buffer.from(`${headlessClientId()}:${headlessClientSecret()}`).toString("base64");
+  return `Basic ${cred}`;
+}
+
 // ── 1. Start a CIBA backchannel authorization ───────────────
 router.post("/start", async (req, res) => {
   pruneExpired();
 
-  if (!pingOneBase() || !headlessClientId()) {
+  if (!pingOneBase() || !headlessClientId() || !headlessClientSecret()) {
     return res.status(503).json({
       error: "CIBA broker not configured.",
-      detail: "Set PINGONE_ENVIRONMENT_ID (or PINGONE_AS_BASE), HEADLESS_CLIENT_ID, and the AZ worker credentials; the headless app must have CIBA enabled in PingOne.",
+      detail: "Set PINGONE_ENVIRONMENT_ID (or PINGONE_AS_BASE), HEADLESS_CLIENT_ID, and HEADLESS_CLIENT_SECRET; the headless app must be confidential with CIBA enabled in PingOne.",
     });
   }
 
@@ -100,12 +114,9 @@ router.post("/start", async (req, res) => {
   try {
     // PingOne CIBA: the backchannel_authentication_endpoint (discovered as
     // /as/cibaAuthorization — PingFederate uses /bc-authorize, PingOne does
-    // not) is authenticated with a Worker app token; the CIBA client's
-    // identity rides in the body as client_id.
-    const workerToken = await getWorkerToken();
-
+    // not) uses standard OAuth client auth. The headless app's own
+    // client_secret_basic identifies the CIBA client; no worker token needed.
     const body = new URLSearchParams({
-      client_id:       headlessClientId(),
       scope:           "openid profile email",
       login_hint:      email,
       binding_message: "WebMCP sign-in",
@@ -115,7 +126,7 @@ router.post("/start", async (req, res) => {
       method: "POST",
       headers: {
         "Content-Type":  "application/x-www-form-urlencoded",
-        "Authorization": `Bearer ${workerToken}`,
+        "Authorization": clientAuthHeader(),
       },
       body: body.toString(),
     });
@@ -183,8 +194,6 @@ router.get("/status", async (req, res) => {
   }
 
   try {
-    const workerToken = await getWorkerToken();
-
     const body = new URLSearchParams({
       grant_type:  "urn:openid:params:grant-type:ciba",
       auth_req_id: entry.auth_req_id,
@@ -194,7 +203,7 @@ router.get("/status", async (req, res) => {
       method: "POST",
       headers: {
         "Content-Type":  "application/x-www-form-urlencoded",
-        "Authorization": `Bearer ${workerToken}`,
+        "Authorization": clientAuthHeader(),
       },
       body: body.toString(),
     });

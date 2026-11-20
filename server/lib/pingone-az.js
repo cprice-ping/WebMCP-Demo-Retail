@@ -90,8 +90,9 @@ function maskSubject(sub) {
 /**
  * Obtain (or return cached) a client_credentials token for the Worker app.
  * Refreshes automatically when fewer than 60 seconds remain.
- * Exported for reuse by the CIBA auth broker (routes/auth.js) — the same
- * worker credential authenticates cibaAuthorization and its token polling.
+ * Used by the P1AZ decision endpoint (routes/checkout.js). The CIBA broker
+ * does NOT use this — it authenticates with the headless app's own
+ * client_secret_basic (standard OAuth client auth for the CIBA grant).
  */
 export async function getWorkerToken() {
   const nowSec = Math.floor(Date.now() / 1000);

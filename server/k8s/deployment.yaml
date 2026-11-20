@@ -33,6 +33,12 @@ spec:
                   name: shopapi-secrets
                   key: HEADLESS_CLIENT_ID
                   optional: true
+            - name: HEADLESS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: shopapi-secrets
+                  key: HEADLESS_CLIENT_SECRET
+                  optional: true
           # Secret env vars — sourced from the Secret
           envFrom:
             - secretRef:
