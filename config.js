@@ -101,7 +101,7 @@ const CONFIG = {
   // with the AZ Worker credential and passes this as the CIBA client_id), so
   // unlike the others this ID also exists as the AGENTIC_CLIENT_ID env var on
   // the server — this entry is display/reference only (Token Inspector hints).
-  PINGONE_HEADLESS_CLIENT_ID: "",
+  PINGONE_HEADLESS_CLIENT_ID: "17c7043a-548a-4861-b255-cdc3be6a443e",
 
   // AG-UI Custom Agent WebSocket endpoint.
   // Set to a wss:// URL to enable the Custom Agent panel and auto-connect on sign-in.
