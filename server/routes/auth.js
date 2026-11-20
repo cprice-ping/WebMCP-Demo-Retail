@@ -14,7 +14,7 @@
 // Flow (RFC: OpenID Client-Initiated Backchannel Authentication):
 //   agent → device_login { email }           (login_hint is CIBA-mandatory —
 //                                             the person must be identified)
-//         → POST /api/auth/start             → broker → POST {as}/bc-authorize
+//         → POST /api/auth/start             → broker → POST {as}/cibaAuthorization
 //                                             → { auth_req_id, expires_in, interval }
 //   PingOne pushes the approval to the person's device (PingOne Verify push /
 //   whatever the agentic client's CIBA flow defines)
@@ -98,9 +98,10 @@ router.post("/start", async (req, res) => {
   }
 
   try {
-    // PingOne CIBA: bc-authorize authenticated with a Worker app token
-    // (the agentic PKCE client's identity rides in pingone_msg / login_hint
-    // parameters per PingOne's CIBA configuration — see README setup).
+    // PingOne CIBA: the backchannel_authentication_endpoint (discovered as
+    // /as/cibaAuthorization — PingFederate uses /bc-authorize, PingOne does
+    // not) is authenticated with a Worker app token; the CIBA client's
+    // identity rides in the body as client_id.
     const workerToken = await getWorkerToken();
 
     const body = new URLSearchParams({
@@ -110,7 +111,7 @@ router.post("/start", async (req, res) => {
       binding_message: "WebMCP sign-in",
     });
 
-    const resp = await fetch(`${pingOneBase()}/bc-authorize`, {
+    const resp = await fetch(`${pingOneBase()}/cibaAuthorization`, {
       method: "POST",
       headers: {
         "Content-Type":  "application/x-www-form-urlencoded",
@@ -121,7 +122,7 @@ router.post("/start", async (req, res) => {
 
     const data = await resp.json();
     if (!resp.ok) {
-      console.warn(`[auth] bc-authorize failed: ${resp.status} ${JSON.stringify(data).slice(0, 300)}`);
+      console.warn(`[auth] cibaAuthorization failed: ${resp.status} ${JSON.stringify(data).slice(0, 300)}`);
       return res.status(502).json({
         error: "PingOne rejected the CIBA backchannel authorization.",
         detail: data.error_description ?? data.error ?? data.message ?? `HTTP ${resp.status}`,

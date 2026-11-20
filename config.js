@@ -97,7 +97,7 @@ const CONFIG = {
   PINGONE_AGENTIC_CLIENT_ID: "813fd8fd-3852-45f3-ab11-4b7418bb2b2c",
 
   // Mode C — headless. App with CIBA enabled; its CIBA flow policy maps to
-  // the push flow. Consumed SERVER-SIDE (the broker authenticates bc-authorize
+  // the push flow. Consumed SERVER-SIDE (the broker authenticates cibaAuthorization
   // with the AZ Worker credential and passes this as the CIBA client_id), so
   // unlike the others this ID also exists as the AGENTIC_CLIENT_ID env var on
   // the server — this entry is display/reference only (Token Inspector hints).
