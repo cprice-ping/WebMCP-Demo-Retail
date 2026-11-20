@@ -79,15 +79,29 @@ const CONFIG = {
   // OIDC scopes to request
   PINGONE_SCOPES: "openid profile email",
 
-  // Dedicated OIDC client for agent-initiated logins (the login tool).
-  // The resulting access_token carries THIS client_id — the "session is
-  // agentic" signal. Forwarded to PingOne Authorize as Request.clientId,
-  // where policy can treat agent checkouts differently (e.g. force step-up).
-  // Create a second public OIDC app (PKCE, same redirect URIs) whose sign-on
-  // policy maps to the OOB HILT DaVinci flow policy, and paste its ID here —
-  // the tool then routes to that flow automatically, no acr_values needed.
-  // Leave empty to reuse the main client (session not separately marked).
+  // ── Agentic clients: ONE PER MODE (session provenance lives in client_id) ──
+  // Each agent-initiated mode gets its own PingOne application so P1AZ policy
+  // can distinguish them cryptographically:
+  //   COMPANION (Mode B) — agent assists in the human's browser; human present.
+  //     Used by the `login` tool (authorize redirect + OOB HILT flow policy).
+  //   HEADLESS (Mode C) — agent executes the browser unattended; human may
+  //     never look. Used by `ciba_login` → backend broker → CIBA push.
+  // Both land in the same TokenProvider seam; the AT's client_id is the only
+  // signal P1AZ needs to give them different postures (e.g. companion may
+  // checkout, headless is read-only). Sharing one client would collapse the
+  // two modes into the weaker one's policy.
+  // Leave COMPANION empty to reuse the main client (session not marked).
+
+  // Mode B — companion. Public OIDC app (PKCE, same redirect URIs), sign-on
+  // policy mapped to the OOB HILT DaVinci flow.
   PINGONE_AGENTIC_CLIENT_ID: "813fd8fd-3852-45f3-ab11-4b7418bb2b2c",
+
+  // Mode C — headless. App with CIBA enabled; its CIBA flow policy maps to
+  // the push flow. Consumed SERVER-SIDE (the broker authenticates bc-authorize
+  // with the AZ Worker credential and passes this as the CIBA client_id), so
+  // unlike the others this ID also exists as the AGENTIC_CLIENT_ID env var on
+  // the server — this entry is display/reference only (Token Inspector hints).
+  PINGONE_HEADLESS_CLIENT_ID: "",
 
   // AG-UI Custom Agent WebSocket endpoint.
   // Set to a wss:// URL to enable the Custom Agent panel and auto-connect on sign-in.

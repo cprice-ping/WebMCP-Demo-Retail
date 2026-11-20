@@ -65,8 +65,13 @@ function pingOneBase() {
       : null);
 }
 
-function agenticClientId() {
-  return process.env.AGENTIC_CLIENT_ID ||
+function headlessClientId() {
+  // Mode C (headless/CIBA) client — deliberately SEPARATE from the companion
+  // client (config.js PINGONE_AGENTIC_CLIENT_ID) so P1AZ policy can give the
+  // two agent modes different postures. AGENTIC_CLIENT_ID kept as a fallback
+  // alias for pre-split deployments.
+  return process.env.HEADLESS_CLIENT_ID ||
+    process.env.AGENTIC_CLIENT_ID ||
     process.env.PINGONE_AGENTIC_CLIENT_ID || "";
 }
 
@@ -74,10 +79,10 @@ function agenticClientId() {
 router.post("/start", async (req, res) => {
   pruneExpired();
 
-  if (!pingOneBase() || !agenticClientId()) {
+  if (!pingOneBase() || !headlessClientId()) {
     return res.status(503).json({
       error: "CIBA broker not configured.",
-      detail: "Set PINGONE_ENVIRONMENT_ID (or PINGONE_AS_BASE), AGENTIC_CLIENT_ID, and the AZ worker credentials; the agentic app must have CIBA enabled in PingOne.",
+      detail: "Set PINGONE_ENVIRONMENT_ID (or PINGONE_AS_BASE), HEADLESS_CLIENT_ID, and the AZ worker credentials; the headless app must have CIBA enabled in PingOne.",
     });
   }
 
@@ -99,7 +104,7 @@ router.post("/start", async (req, res) => {
     const workerToken = await getWorkerToken();
 
     const body = new URLSearchParams({
-      client_id:       agenticClientId(),
+      client_id:       headlessClientId(),
       scope:           "openid profile email",
       login_hint:      email,
       binding_message: "WebMCP sign-in",

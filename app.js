@@ -886,10 +886,22 @@ async function authStatusHandler(args) {
       return { signed_in: false, detail: "No session. Use login (redirect + out-of-band approval) or ciba_login (push approval) to sign in." };
     }
     const claims = parseJwt(token) ?? {};
+    const clientId = claims.client_id ?? claims.azp ?? null;
+    // Session provenance from client_id — the same signal P1AZ policy keys on.
+    const authMode = sessionStorage.getItem("agent_auth_mode") || "browser";
+    const provenance =
+      authMode === "broker"
+        ? "agent-headless"                                                        // Mode C: CIBA push, agent-only
+        : clientId && clientId === CONFIG.PINGONE_AGENTIC_CLIENT_ID
+          ? "agent-companion"                                                     // Mode B: login tool, human in tab
+          : clientId
+            ? (clientId === CONFIG.PINGONE_HEADLESS_CLIENT_ID ? "agent-headless" : "human") // Mode A (or headless client seen in browser mode)
+            : "human";
     return {
       signed_in: true,
-      client_id: claims.client_id ?? claims.azp ?? null,
-      auth_mode: sessionStorage.getItem("agent_auth_mode") || "browser",
+      client_id: clientId,
+      auth_mode: authMode,
+      provenance,   // "human" | "agent-companion" | "agent-headless" — mirrors the P1AZ policy split
       expires_at: claims.exp ? new Date(claims.exp * 1000).toISOString() : null,
     };
   }
@@ -922,7 +934,7 @@ async function authStatusHandler(args) {
         status: "approved",
         signed_in: true,
         auth_mode: "broker",
-        note: "Device flow approved out-of-band. The tab now acts with the device-flow token (agentic client). All store tools are available.",
+        note: "CIBA approval received out-of-band (push to the person's device). The tab now acts with the headless session token (headless client). All store tools are available.",
       };
     } catch (err) {
       return { error: `Approved but token pickup failed: ${err.message}. Re-poll auth_status to retry pickup.`, code: "TOKEN_PICKUP_FAILED" };
