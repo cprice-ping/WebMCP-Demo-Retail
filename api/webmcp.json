@@ -1,26 +1,36 @@
 {
   "siteLabel": "accessories",
-  "description": "WebMCP Retail demo — accessories store with WebMCP + AG-UI custom agent support",
+  "description": "WebMCP Retail demo \u2014 accessories store with WebMCP + AG-UI custom agent support",
   "tools": [
     {
       "name": "login",
       "title": "Login",
-      "description": "Signs the user in via PingOne. Ask the user for their account email address in chat first, then pass it as the email parameter. The tab navigates to the PingOne sign-in, the user completes out-of-band verification there (e.g. approving on their phone), and the app reloads signed in — the store tools then become available. Only usable when signed out.",
+      "description": "Signs the user in via PingOne by navigating THIS TAB to the sign-in flow. Use when a person is present and can see this tab (companion agent in the user's browser, or a visible browser you control). Ask the user for their account email address in chat first, then pass it as the email parameter; the user completes out-of-band verification (e.g. approving on their phone) and the app reloads signed in. WARNING: do not call from a headless or ephemeral automation context \u2014 navigation unloads the tab and you lose it; use ciba_login instead. Only usable when signed out.",
       "parameters": {
         "type": "object",
         "properties": {
-          "email": { "type": "string", "description": "The user's email address — ask the user for it in chat before calling this tool." }
+          "email": {
+            "type": "string",
+            "description": "The user's email address \u2014 ask the user for it in chat before calling this tool."
+          }
         },
-        "required": ["email"]
+        "required": [
+          "email"
+        ]
       },
-      "annotations": { "readOnlyHint": false, "consequentialHint": false }
+      "annotations": {
+        "readOnlyHint": false,
+        "consequentialHint": false
+      }
     },
     {
       "name": "view_products",
       "title": "View Products",
       "description": "Fetches the product catalog from the backend API. Requires an active user session.",
       "parameters": {},
-      "annotations": { "readOnlyHint": true },
+      "annotations": {
+        "readOnlyHint": true
+      },
       "requiresSession": true
     },
     {
@@ -30,10 +40,20 @@
       "parameters": {
         "type": "object",
         "properties": {
-          "product_id": { "type": "string", "description": "Product ID from the catalog" },
-          "quantity":   { "type": "integer", "description": "Number of units to add", "minimum": 1 }
+          "product_id": {
+            "type": "string",
+            "description": "Product ID from the catalog"
+          },
+          "quantity": {
+            "type": "integer",
+            "description": "Number of units to add",
+            "minimum": 1
+          }
         },
-        "required": ["product_id", "quantity"]
+        "required": [
+          "product_id",
+          "quantity"
+        ]
       },
       "requiresSession": true
     },
@@ -42,28 +62,37 @@
       "title": "View Cart",
       "description": "Returns the current cart contents and total as JSON. Requires an active user session.",
       "parameters": {},
-      "annotations": { "readOnlyHint": true },
+      "annotations": {
+        "readOnlyHint": true
+      },
       "requiresSession": true
     },
     {
       "name": "remove_from_cart",
       "title": "Remove from Cart",
-      "description": "Removes a product entirely from the cart by product ID. Dynamically registered — only available when the cart contains items.",
+      "description": "Removes a product entirely from the cart by product ID. Dynamically registered \u2014 only available when the cart contains items.",
       "parameters": {
         "type": "object",
         "properties": {
-          "product_id": { "type": "string", "description": "Product ID to remove" }
+          "product_id": {
+            "type": "string",
+            "description": "Product ID to remove"
+          }
         },
-        "required": ["product_id"]
+        "required": [
+          "product_id"
+        ]
       },
       "dynamic": true
     },
     {
       "name": "checkout",
       "title": "Checkout",
-      "description": "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. The host prompts the user for confirmation (consequentialHint) before this tool runs. If the policy requires step-up, the tab navigates to the PingOne OOB verification flow (user approves on their device); the app then returns with the cart intact — call this tool again to place the order. Dynamically registered — only available when the cart contains items.",
+      "description": "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. The host prompts the user for confirmation (consequentialHint) before this tool runs. If the policy requires step-up, the tab navigates to the PingOne OOB verification flow (user approves on their device); the app then returns with the cart intact \u2014 call this tool again to place the order. Dynamically registered \u2014 only available when the cart contains items.",
       "parameters": {},
-      "annotations": { "consequentialHint": true },
+      "annotations": {
+        "consequentialHint": true
+      },
       "dynamic": true
     }
   ]

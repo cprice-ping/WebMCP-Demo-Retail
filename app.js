@@ -772,7 +772,7 @@ async function requireSession() {
 // (signing in again is a button action at that point).
 const LOGIN_TOOL_DESCRIPTOR = {
   title: "Login",
-  description: "Signs the user in via PingOne. Ask the user for their account email address in chat first, then pass it as the email parameter. The tab navigates to the PingOne sign-in, the user completes out-of-band verification there (e.g. approving on their phone), and the app reloads signed in — the store tools then become available. Only usable when signed out.",
+  description: "Signs the user in via PingOne by navigating THIS TAB to the sign-in flow. Use when a person is present and can see this tab (companion agent in the user's browser, or a visible browser you control). Ask the user for their account email address in chat first, then pass it as the email parameter; the user completes out-of-band verification (e.g. approving on their phone) and the app reloads signed in. WARNING: do not call from a headless or ephemeral automation context — navigation unloads the tab and you lose it; use ciba_login instead. Only usable when signed out.",
   parameters: {
     type: "object",
     properties: {
@@ -782,7 +782,7 @@ const LOGIN_TOOL_DESCRIPTOR = {
   },
   ui: {
     labels: [{text:"OIDC", cls:"tool-label-api"}, {text:"OOB", cls:"tool-label-auth"}, {text:"REDIRECT", cls:"tool-label-mutate"}],
-    desc: "Navigates the tab to the PingOne authorize request, runs the DaVinci OOB HILT flow; the app returns signed in via the OIDC callback.",
+    desc: "Navigates the tab to the PingOne authorize request (companion client); OOB HILT flow; app returns signed in. Person-attended tabs only.",
     inputs: false,
   },
 };
@@ -805,7 +805,7 @@ let cibaRequestId = null;
 
 const CIBA_LOGIN_DESCRIPTOR = {
   title: "CIBA Login",
-  description: "Starts a CIBA (backchannel) sign-in for headless or agent-only contexts. The authorization server pushes an approval request to the person's device (e.g. a push notification they approve). email is REQUIRED — it identifies whose device receives the approval. After calling this, poll auth_status { request_id } until it returns approved. Only usable when signed out.",
+  description: "Signs the user in WITHOUT navigating this tab — safe in any context, including headless or ephemeral automation where navigation would destroy the tab. The authorization server pushes an approval request to the person's device (e.g. a push notification they approve); no redirect, no code entry. email is REQUIRED — it identifies whose device receives the approval (ask the person in chat). After calling this, poll auth_status { request_id } until it returns approved. Prefer login instead when a person is watching the tab, so the session carries companion provenance (fuller permissions). Only usable when signed out.",
   parameters: {
     type: "object",
     properties: {
@@ -815,7 +815,7 @@ const CIBA_LOGIN_DESCRIPTOR = {
   },
   ui: {
     labels: [{text:"OIDC", cls:"tool-label-api"}, {text:"OOB", cls:"tool-label-auth"}, {text:"CIBA", cls:"tool-label-mutate"}],
-    desc: "Starts a CIBA backchannel auth via the backend broker; the approval is pushed to the person's device.",
+    desc: "CIBA backchannel auth via the backend broker (headless client); approval pushed to the person's device. Safe in any context, incl. headless.",
     inputs: false,
   },
 };
