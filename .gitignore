@@ -5,3 +5,8 @@ server/k8s/secret.yaml
 
 # macOS
 .DS_Store
+
+# Local tooling state (per-machine)
+.letta/
+.impeccable/
+WebMCP Early Preview.md
