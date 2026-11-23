@@ -40,6 +40,7 @@
 
 import { Router } from "express";
 import { randomUUID } from "crypto";
+import { stepUpContexts } from "./checkout.js";
 
 const router = Router();
 
@@ -116,12 +117,25 @@ router.post("/start", async (req, res) => {
     // /as/cibaAuthorization — PingFederate uses /bc-authorize, PingOne does
     // not) uses standard OAuth client auth. The headless app's own
     // client_secret_basic identifies the CIBA client; no worker token needed.
+    //
+    // step_up_code (optional): a checkout step-up stashed an authoritative
+    // order summary server-side (routes/checkout.js). CIBA's only display
+    // channel is binding_message (1-8 chars), so the code IS the transaction
+    // pointer — the DaVinci flow fetches the full summary from /context/:code.
+    const stepUpCode = typeof req.body?.step_up_code === "string"
+      ? req.body.step_up_code.trim().toUpperCase().slice(0, 8)
+      : "";
+    if (stepUpCode && !/^[A-Z0-9]{4,8}$/.test(stepUpCode)) {
+      return res.status(400).json({ error: "step_up_code must be 4-8 alphanumeric characters." });
+    }
+
     const body = new URLSearchParams({
       scope:           "openid profile email",
       login_hint:      email,
       // PingOne caps binding_message at 8 chars — keep it short and scannable
-      // (it's what the person compares against the push notification).
-      binding_message: "WebMCP",
+      // (it's what the person compares against the push notification). A
+      // step-up code doubles as the transaction pointer for the flow.
+      binding_message: stepUpCode || "WebMCP",
     });
 
     const resp = await fetch(`${pingOneBase()}/cibaAuthorization`, {
@@ -275,6 +289,24 @@ router.post("/token", (req, res) => {
   entry.state = "consumed";
   console.log(`[auth] token picked up — request_id: ${requestId}`);
   return res.json(token);
+});
+
+// ── 4. Step-up context (DaVinci flow → this endpoint) ─────────
+// The verification flow resolves the transaction pointer it was given
+// (request object param on redirect step-up, binding_message on CIBA) into
+// the authoritative order summary. Server-confirmed data only — the client
+// never supplies display details. The store lives in checkout.js (imported
+// above); this endpoint is the flow's read side, one fetch per code.
+router.get("/context/:code", (req, res) => {
+  const code = String(req.params.code ?? "").trim().toUpperCase();
+  const ctx = stepUpContexts.get(code);
+  if (!ctx) {
+    return res.status(404).json({ error: "Unknown or expired step-up reference.", code });
+  }
+  // One fetch per code — the flow displays it once; repeats (retries) 404.
+  stepUpContexts.delete(code);
+  console.log(`[auth] step-up context served — code: ${code}, total: ${ctx.order_total}`);
+  return res.json(ctx);
 });
 
 export default router;

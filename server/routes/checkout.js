@@ -12,7 +12,42 @@ import { randomUUID } from "crypto";
 import { validateAccessToken } from "../lib/token.js";
 import { requestDecision, agentIdentityParameters } from "../lib/pingone-az.js";
 
+// NOTE: routes/auth.js imports stepUpContexts from this module, and this
+// module does NOT import auth.js — checkout.js stays dependency-free of the
+// broker, so the load order is checkout → auth with no cycle.
+
 const router = Router();
+
+// Order summaries stashed when a policy deny demands step-up, keyed by a
+// short reference code. The reference travels to the verification flow
+// (request object on redirect step-up, binding_message on CIBA); the flow
+// fetches the authoritative summary from /context/:code instead of trusting
+// anything the client displayed. Entries expire with the prune below.
+const stepUpContexts = new Map();
+const STEPUP_CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"; // no 0/O/1/I/L — human-readable
+
+function generateStepUpCode() {
+  let code = "";
+  for (let i = 0; i < 6; i++) {
+    code += STEPUP_CODE_CHARS[Math.floor(Math.random() * STEPUP_CODE_CHARS.length)];
+  }
+  return stepUpContexts.has(code) ? generateStepUpCode() : code;
+}
+
+// The step-up context Map lives here (the deny is where orders originate);
+// routes/auth.js imports it to serve /context/:code to the DaVinci flow.
+export { stepUpContexts };
+
+export function stashStepUpContext(order) {
+  const code = generateStepUpCode();
+  stepUpContexts.set(code, { ...order, stashed_at: Date.now() });
+  // Opportunistic prune: drop entries older than 15 minutes.
+  const cutoff = Date.now() - 15 * 60 * 1000;
+  for (const [c, v] of stepUpContexts) {
+    if (v.stashed_at < cutoff) stepUpContexts.delete(c);
+  }
+  return code;
+}
 
 function maskSubject(sub) {
   if (!sub || typeof sub !== "string") return "(unknown)";
@@ -191,7 +226,20 @@ router.post("/", async (req, res) => {
         `[checkout] DENY with interactive statements — ` +
         `sub: ${maskSubject(claims.sub)}, codes: ${interactive.map(s => s.code).join(", ")}`
       );
-      return res.status(202).json({ denied: true, statements: interactive });
+
+      // Stash the authoritative order summary under a short reference code.
+      // The client passes only the code to the verification flow (request
+      // object / binding_message); the flow fetches the real summary from
+      // the context endpoint, so displayed details are server-confirmed.
+      const stepUpCode = stashStepUpContext({
+        order_items: items.map(i => ({ name: i.name ?? i.product_id, quantity: i.quantity, line_total: i.line_total })),
+        order_total: total ?? items.reduce((sum, i) => sum + (i.line_total ?? 0), 0),
+        item_count:  items.reduce((n, i) => n + (i.quantity ?? 0), 0),
+        user_sub:    claims.sub,
+        client_id:   claims.client_id ?? claims.azp ?? null,
+      });
+
+      return res.status(202).json({ denied: true, step_up_code: stepUpCode, statements: interactive });
     }
 
     // ── Hard DENY: no client-actionable statements ───────────────

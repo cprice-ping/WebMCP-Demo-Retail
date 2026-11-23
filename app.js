@@ -268,7 +268,7 @@ async function startLogin() {
 // sign-on policy maps to the OOB flow policy, so authorizing against that
 // client lands in the right flow with no acr_values plumbing.
 // login_hint pre-fills the identity the agent collected from the user.
-async function buildAuthorizeUrl({ loginHint, verifier, state, nonce, clientId }) {
+async function buildAuthorizeUrl({ loginHint, verifier, state, nonce, clientId, extraParams = {} }) {
   const challenge = await sha256Base64url(verifier);
 
   const params = new URLSearchParams({
@@ -288,6 +288,14 @@ async function buildAuthorizeUrl({ loginHint, verifier, state, nonce, clientId }
     params.set("login_hint", loginHint);
   }
 
+  // Custom authorize parameters (e.g. step_up_code on a step-up redirect) —
+  // the flow reads them from global.parameters.authorizationRequest.<name>.
+  // Values must be short and code-like: they're pointers the flow resolves
+  // server-side, never display payloads.
+  for (const [key, value] of Object.entries(extraParams)) {
+    if (value != null && key.length <= 64) params.set(key, String(value));
+  }
+
   return `${CONFIG.PINGONE_AS_BASE}/authorize?${params}`;
 }
 
@@ -299,7 +307,7 @@ async function buildAuthorizeUrl({ loginHint, verifier, state, nonce, clientId }
 // the session is marked as agent-initiated (forwarded to PingOne Authorize
 // as WebMCP.Request.clientId for policy conditioning). Button logins keep
 // the main client.
-async function createLoginSession({ loginHint, agentic = false } = {}) {
+async function createLoginSession({ loginHint, agentic = false, extraParams = {} } = {}) {
   const verifier = randomBase64url(64);
   const state    = randomBase64url(16);
   const nonce    = randomBase64url(16);
@@ -317,7 +325,7 @@ async function createLoginSession({ loginHint, agentic = false } = {}) {
   sessionStorage.setItem("oauth_client_id", clientId);
 
   const authorizeUrl = await buildAuthorizeUrl({
-    loginHint, verifier, state, nonce, clientId,
+    loginHint, verifier, state, nonce, clientId, extraParams,
   });
 
   return { authorizeUrl, verifier, state, clientId };
@@ -863,7 +871,7 @@ async function cibaLoginHandler(args) {
 
 const AUTH_STATUS_DESCRIPTOR = {
   title: "Auth Status",
-  description: "Without request_id: reports the current tab session ({ signed_in, client_id }). With request_id (from ciba_login): polls the pending CIBA approval — returns pending (with retry_after), approved (session established), expired, or denied.",
+  description: "Without request_id: reports the current tab session ({ signed_in, client_id, provenance }). With request_id: polls a pending CIBA approval (from ciba_login, or from a checkout step-up challenge) — returns pending (with retry_after), approved (session established), expired, or denied.",
   parameters: {
     type: "object",
     properties: {
@@ -1172,27 +1180,98 @@ function checkoutHandlerAgent(args) {
 
       const apiResponse = await checkoutPost(requestBody);
 
-      // ── P1AZ interactive DENY → OOB HILT step-up (same path as login) ──
-      // Any interactive deny navigates the tab to the OOB flow — the same
-      // agentic-client authorize the login tool uses. The DaVinci flow owns
-      // WHAT verification runs (Verify push, OTP, anything); the page only
-      // stashes the cart and returns a challenge the agent can act on.
-      // After the human approves out-of-band, the app returns signed in
-      // (fresh auth_time) and the agent re-calls checkout.
+      // ── P1AZ interactive DENY → step-up by transport ────────────────
+      // Any interactive deny means "come back with a fresher session." The
+      // page picks the transport from its own auth mode — the same mechanism
+      // that created the session re-authenticates it:
+      //   browser mode (A/B) → OOB redirect (tab navigates, person approves
+      //     on their device, app reloads with fresh auth_time)
+      //   broker mode (C)    → CIBA re-auth via the backend broker (no
+      //     navigation; push to the person's device; agent polls auth_status)
+      // The server stashed an authoritative order summary under
+      // apiResponse.step_up_code; the code travels to the verification flow
+      // (authorize request object / CIBA binding_message) so the flow can
+      // display server-confirmed transaction details.
+      // After either transport completes, mountApp() restores the stashed
+      // cart and the agent re-calls checkout.
       if (apiResponse?.denied && apiResponse.statements?.length) {
         const statementCodes = apiResponse.statements.map(s => s.code).join(", ");
-        logToolEvent(`[checkout] P1AZ: interactive deny (${statementCodes}) — OOB HILT step-up`, "info");
+        const stepUpCode = typeof apiResponse.step_up_code === "string" ? apiResponse.step_up_code : "";
 
-        // Persist the cart so it survives the redirect round-trip.
+        // Persist the cart so it survives either round-trip.
         sessionStorage.setItem("pending_cart", JSON.stringify(cart));
-
-        // Drop the pending-order id: the retry generates a fresh one, and
-        // the server treats the second pass as a new request that now
-        // carries a fresh auth_time from the OOB-verified session.
         sessionStorage.setItem("checkout_retry", "1");
+
+        const isBroker = (sessionStorage.getItem("agent_auth_mode") || "browser") === "broker";
+
+        if (isBroker) {
+          // ── CIBA step-up (headless) ─────────────────────────────
+          logToolEvent(`[checkout] P1AZ: interactive deny (${statementCodes}) — CIBA step-up (${stepUpCode})`, "info");
+          const email = idTokenClaims?.email || "";
+          if (!email) {
+            sessionStorage.removeItem("pending_cart");
+            sessionStorage.removeItem("checkout_retry");
+            return { error: "Step-up requires the session email but the id_token has none. Sign in again with ciba_login.", code: "STEP_UP_NO_EMAIL" };
+          }
+          let start;
+          try {
+            start = await apiRequest("POST", "/auth/start", {
+              body: { email, step_up_code: stepUpCode || undefined },
+            });
+          } catch (err) {
+            sessionStorage.removeItem("pending_cart");
+            sessionStorage.removeItem("checkout_retry");
+            return { error: `Step-up broker unavailable: ${err.message}`, code: "STEP_UP_BROKER_UNAVAILABLE" };
+          }
+          if (start?.error) {
+            sessionStorage.removeItem("pending_cart");
+            sessionStorage.removeItem("checkout_retry");
+            return { error: start.error, detail: start.detail, code: start.code ?? "STEP_UP_START_FAILED" };
+          }
+
+          // The pending handle rides the same state as ciba_login —
+          // auth_status polls it identically. Registration-wise auth_status
+          // is signed-out-only, so re-register it for the polling phase.
+          cibaRequestId = start.request_id;
+          if (!toolRegistry.auth_status) {
+            registerTool("auth_status", AUTH_STATUS_DESCRIPTOR, authStatusHandler);
+          }
+
+          return {
+            challenge: "STEP_UP_REQUIRED",
+            transport: "ciba",
+            step_up_code: stepUpCode || undefined,
+            detail:
+              "The checkout requires step-up verification. An approval request is being pushed to " +
+              `${email}'s device (reference ${stepUpCode || "n/a"}). ` +
+              `Poll auth_status { request_id: "${start.request_id}" } (respecting retry_after) until it returns approved; ` +
+              "the session is then re-established with a fresh authentication and the cart is restored — call checkout again to place the order.",
+            statements: statementCodes,
+            request_id: start.request_id,
+            pending_order: { total: order.total, item_count: order.items.reduce((n, i) => n + i.quantity, 0) },
+          };
+        }
+
+        // ── OOB redirect step-up (companion / human-shared tab) ────
+        logToolEvent(`[checkout] P1AZ: interactive deny (${statementCodes}) — OOB redirect step-up (${stepUpCode})`, "info");
+
+        // Re-authenticate under the session's own client so provenance is
+        // unchanged. The email rides login_hint (no chat round-trip); the
+        // step-up code rides as a custom authorize parameter — DaVinci reads
+        // it from global.parameters.authorizationRequest.step_up_code and
+        // fetches the transaction summary from the broker context endpoint.
+        const email = idTokenClaims?.email || "";
+        const { authorizeUrl } = await createLoginSession({ loginHint: email || undefined, agentic: true, extraParams: stepUpCode ? { step_up_code: stepUpCode } : {} });
+
+        // Navigation unloads this frame — execution ends here, exactly like
+        // the login tool. Unreachable-return pattern per spec AbortError.
+        window.location.href = authorizeUrl;
 
         return {
           challenge: "STEP_UP_REQUIRED",
+          transport: "redirect",
+          step_up_code: stepUpCode || undefined,
+          redirecting: true,
           detail:
             "The checkout requires step-up verification. The tab is navigating to the PingOne " +
             "sign-in flow — the user completes verification out-of-band (e.g. approves on their " +
@@ -2005,29 +2084,47 @@ async function mountApp() {
     logToolEvent("[tools] login unregistered — session established");
   }
 
-  // Mode C tools only make sense signed-out.
-  for (const name of ["ciba_login", "auth_status", "device_login"]) {  // device_login: legacy cleanup
+  // Mode C tools only make sense signed-out. auth_status is re-registered
+  // by the checkout agent path during a broker step-up (the polling phase
+  // happens mid-session), and the post-step-up mountApp() below leaves it
+  // alone when a step-up code is pending.
+  for (const name of ["ciba_login", "device_login"]) {  // device_login: legacy cleanup
     if (toolRegistry[name]) {
       unregisterTool(name);
       logToolEvent(`[tools] ${name} unregistered — session established`);
     }
   }
+  if (toolRegistry.auth_status && !sessionStorage.getItem("pending_cart")) {
+    // No step-up in flight — normal sign-in: remove the polling tool.
+    // (Kept during a CIBA step-up so the agent can poll to completion.)
+    unregisterTool("auth_status");
+    logToolEvent("[tools] auth_status unregistered — session established");
+  }
 
   // Session is active — the store tools become available.
   registerStoreTools();
 
-  // Restore a cart stashed by an OOB step-up round-trip (checkout agent
-  // path). The user verified out-of-band; the agent re-calls checkout with
-  // the fresh auth_time. Cleared once restored.
+  // Restore a cart stashed by a step-up round-trip (either transport —
+  // redirect reload or CIBA approval followed by auth_status → mountApp).
+  // The session is fresh; the agent re-calls checkout with the new auth_time.
   const stashedCart = sessionStorage.getItem("pending_cart");
   const isRetry = sessionStorage.getItem("checkout_retry") === "1";
   if (stashedCart) {
     try {
       cart = JSON.parse(stashedCart) ?? {};
-      logToolEvent(`[checkout] cart restored after OOB step-up — ${Object.keys(cart).length} product(s); retry checkout now`);
+      logToolEvent(`[checkout] cart restored after step-up — ${Object.keys(cart).length} product(s); retry checkout now`);
     } catch { /* corrupt stash — ignore */ }
     sessionStorage.removeItem("pending_cart");
     sessionStorage.removeItem("checkout_retry");
+    // Step-up complete — the mid-session polling tool goes away again.
+    if (toolRegistry.auth_status && !sessionStorage.getItem("agent_auth_mode")) {
+      // (broker sessions keep auth_status only while a CIBA step-up poll is
+      // in flight — cibaRequestId non-null — which the branch above handles)
+    }
+    if (toolRegistry.auth_status && cibaRequestId === null) {
+      unregisterTool("auth_status");
+      logToolEvent("[tools] auth_status unregistered — step-up complete");
+    }
   }
 
   // Use the tool to load products — same code path as an agent call.
