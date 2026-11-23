@@ -37,30 +37,6 @@ function isLocalHostname(hostname) {
   return hostname === "localhost" || hostname === "127.0.0.1";
 }
 
-// Agent WebSocket hosts eligible to receive TOOL_CALLs. Empty by default —
-// add e.g. "wss://your-agent.example" here once you have a deployed agent.
-// ws:// (insecure) is allowed only when the page itself is on localhost.
-function agentWsAllowlist() {
-  const hosts = [];
-  if (isPageOnLocalhost()) {
-    hosts.push("ws://localhost", "ws://127.0.0.1", "wss://localhost", "wss://127.0.0.1");
-  }
-  return hosts;
-}
-
-// Returns the validated URL, or null. wss:// required (ws:// localhost-only);
-// host must be in the allowlist.
-function validateAgentUrl(agentUrl) {
-  if (!agentUrl || typeof agentUrl !== "string") return null;
-  try {
-    const u = new URL(agentUrl);
-    if (u.protocol !== "wss:" && !(isPageOnLocalhost() && u.protocol === "ws:")) return null;
-    const hostKey = `${u.protocol}//${u.host}`;
-    if (!agentWsAllowlist().some(a => a === hostKey || hostKey.startsWith(a))) return null;
-    return u.toString();
-  } catch { return null; }
-}
-
 const CONFIG = {
   // Your PingOne Application Client ID
   PINGONE_CLIENT_ID: "1e9994ca-366d-4954-b1d8-32c3506e9641",
@@ -102,36 +78,6 @@ const CONFIG = {
   // unlike the others this ID also exists as the AGENTIC_CLIENT_ID env var on
   // the server — this entry is display/reference only (Token Inspector hints).
   PINGONE_HEADLESS_CLIENT_ID: "17c7043a-548a-4861-b255-cdc3be6a443e",
-
-  // AG-UI Custom Agent WebSocket endpoint.
-  // Set to a wss:// URL to enable the Custom Agent panel and auto-connect on sign-in.
-  // Leave empty to hide the agent panel (BCA-only demo mode).
-  // ?agentUrl= query param overrides (persisted in sessionStorage).
-  // ── Agent WebSocket allowlist ──────────────────────────────────
-  // The agent end receives TOOL_CALLs that execute in the tab with the
-  // user's session, so an arbitrary ?agentUrl= must never auto-connect.
-  // A ?agentUrl= value may PREFILL the agent URL input only — connecting
-  // requires an explicit user click on Connect, and the value must pass
-  // validateAgentUrl() (scheme + allowlist) there before any socket opens.
-  AGUI_AGENT_URL: (() => {
-    const param = new URLSearchParams(window.location.search).get("agentUrl");
-    if (param) {
-      // Persist only if it validates; otherwise just prefill and warn.
-      if (validateAgentUrl(param)) {
-        sessionStorage.setItem("agentUrl", param);
-        return param;
-      }
-      console.warn(`[config] ignoring untrusted agentUrl="${param}" — failed allowlist/scheme validation; prefill only`);
-      return param;
-    }
-    const stored = sessionStorage.getItem("agentUrl");
-    if (stored) {
-      if (validateAgentUrl(stored)) return stored;
-      console.warn(`[config] ignoring untrusted stored agentUrl="${stored}"`);
-      sessionStorage.removeItem("agentUrl");
-    }
-    return "";
-  })(),
 
   // ── API base allowlist ─────────────────────────────────────────
   // SHOP_API_BASE carries the bearer token on every apiRequest(), so a

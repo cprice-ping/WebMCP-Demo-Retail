@@ -5,8 +5,8 @@
 
 "use strict";
 
-// Stable identifier for this site — sent to the Custom Agent on WS connect.
-// The agent namespaces tools as "accessories.view_products" etc.
+// Stable identifier for this site. Reserved for future use (e.g. namespacing
+// in multi-site agent registries).
 const SITE_LABEL = "accessories";
 
 // ------------------------------------------------------------
@@ -1122,7 +1122,7 @@ async function checkoutHandler(args, executeOptions) {
       return checkoutHandlerAgent(args);
     }
 
-    // ── Human-present path: in-page modal (UI clicks, AG-UI panel) ──
+    // ── Human-present path: in-page modal (UI clicks) ──
     return checkoutHandlerHuman(args, executeOptions);
 }
 
@@ -1215,7 +1215,7 @@ function checkoutHandlerAgent(args) {
     })();
 }
 
-// ── Human-present path (UI clicks, AG-UI panel) ────────────────────────
+// ── Human-present path (UI clicks) ────────────────────────
 // In-page modals are appropriate here: the human is in the tab.
 async function checkoutHandlerHuman(args, executeOptions) {
     // Spec ToolExecuteCallbackOptions carries { signal }: the agent cancelling
@@ -1418,50 +1418,6 @@ document.addEventListener("DOMContentLoaded", () => {
   // Login footnote scope — driven from CONFIG, not hardcoded
   const footnote = document.getElementById("login-scope");
   if (footnote) footnote.textContent = CONFIG.PINGONE_SCOPES;
-
-  // ── Agent panel wiring ──────────────────────────────────────
-  document.getElementById("btn-agent-connect")?.addEventListener("click", () => {
-    const state = (typeof getAgentConnectionState === "function")
-      ? getAgentConnectionState()
-      : "disconnected";
-    if (state === "connected") {
-      if (typeof disconnectAgent === "function") disconnectAgent();
-    } else {
-      const urlInput = document.getElementById("agent-url-input");
-      const url = urlInput?.value.trim();
-      if (!url) return;
-      // Explicit user click is the only path to connect (no auto-connect).
-      // connectToAgent re-validates and refuses non-allowlisted hosts; the
-      // status line shows which host is being connected to.
-      if (typeof connectToAgent === "function") {
-        connectToAgent(url, SITE_LABEL, buildToolManifest, invokeToolForAgent, onAgentTextMessage);
-        try {
-          const host = new URL(url).host;
-          logToolEvent(`[agent] connecting to ${host} (user-initiated)`);
-        } catch { /* connectToAgent validates and warns */ }
-      }
-    }
-  });
-
-  document.getElementById("btn-agent-send")?.addEventListener("click", () => {
-    const input = document.getElementById("agent-chat-input");
-    if (!input) return;
-    const text = input.value.trim();
-    if (!text) return;
-    sendUserMessage(text);
-    input.value = "";
-  });
-
-  document.getElementById("agent-chat-input")?.addEventListener("keydown", (e) => {
-    if (e.key === "Enter" && !e.shiftKey) {
-      e.preventDefault();
-      const input = e.target;
-      const text = input.value.trim();
-      if (!text) return;
-      sendUserMessage(text);
-      input.value = "";
-    }
-  });
 });
 
 function cartSummary() {
@@ -1651,7 +1607,7 @@ document.addEventListener("click", (e) => {
 // Tool console (simulate agent calls from UI)
 // ============================================================
 
-const _SRC_CLASS = { "ui": "ui", "custom-agent": "agent", "document.modelContext": "mc" };
+const _SRC_CLASS = { "ui": "ui", "document.modelContext": "mc" };
 
 function logToolEvent(message, level = "info", source = null) {
   const log = document.getElementById("tool-log");
@@ -1725,7 +1681,7 @@ function readInternalInvocationSource(request) {
 
 // Per the current spec, execute(inputObject, options) receives the plain
 // input object and returns any JSON-serializable value — the host does the
-// serialization. Internal callers (UI console, product grid, AG-UI bridge)
+// serialization. Internal callers (UI console, product grid)
 // mark their calls with the private token above; every unmarked call is
 // treated as a native agent invocation (source "document.modelContext") —
 // the fail-safe default, since the agent path is the stricter one.
@@ -2102,111 +2058,6 @@ async function mountApp() {
   // Initialise PingOne Protect — non-blocking; fires and forgets.
   // SDK will be ready well before the first checkout is triggered.
   initProtectSDK();
-
-  // ── AG-UI Custom Agent ──────────────────────────────────────
-  // Show/hide the agent panel based on whether a URL is configured.
-  // ?agentUrl= prefills the input ONLY — connecting hands TOOL_CALL
-  // execution to the remote end, so it requires an explicit user click
-  // on Connect (which re-validates via connectToAgent's own check).
-  const agentPanel = document.getElementById("agent-panel");
-  if (agentPanel) {
-    if (CONFIG.AGUI_AGENT_URL) {
-      agentPanel.classList.remove("hidden");
-      const urlInput = document.getElementById("agent-url-input");
-      if (urlInput) urlInput.value = CONFIG.AGUI_AGENT_URL;
-      // No auto-connect — the user must click Connect.
-    } else {
-      agentPanel.classList.add("hidden");
-    }
-  }
-}
-
-// ============================================================
-// AG-UI Custom Agent bridge
-// ============================================================
-
-/**
- * Returns the current toolRegistry as an array of AG-UI tool definitions.
- * Sent to the agent on SITE_CONNECT and on every TOOLS_UPDATE.
- */
-function buildToolManifest() {
-  return Object.entries(toolRegistry).map(([name, value]) => ({
-    name,
-    title:       value.descriptor?.title       || name,
-    description: value.descriptor?.description || "",
-    parameters:  value.descriptor?.parameters  || { type: "object", properties: {} },
-    ...(value.descriptor?.annotations && { annotations: value.descriptor.annotations }),
-  }));
-}
-
-/**
- * Invoke a tool on behalf of the Custom Agent.
- * Called by ag-ui-client.js TOOL_CALL handler.
- * Returns the tool's result serialized as a string for the TOOL_RESULT frame.
- */
-async function invokeToolForAgent(toolCallId, name, argsString) {
-  const tool = toolRegistry[name];
-  if (!tool) return JSON.stringify({ error: `Unknown tool: ${name}` });
-
-  const mockClient = {};
-
-  let args;
-  try { args = JSON.parse(argsString); } catch { args = {}; }
-
-  const result = await tool.handler(
-    markInternalInvocation({ arguments: args }, "custom-agent"),
-    mockClient
-  );
-
-  return JSON.stringify(result);
-}
-
-/**
- * Receive streaming text from the agent and render it in the chat thread.
- * Called by ag-ui-client.js TEXT_MESSAGE / TEXT_MESSAGE_END handlers.
- */
-function onAgentTextMessage(delta, messageId, done) {
-  const thread = document.getElementById("agent-message-thread");
-  if (!thread) return;
-
-  // Remove the empty-state placeholder on first message
-  thread.querySelector(".agent-thread-empty")?.remove();
-
-  let bubble = thread.querySelector(`[data-msg-id="${CSS.escape(messageId)}"]`);
-  if (!bubble) {
-    bubble = document.createElement("div");
-    bubble.className    = "agent-bubble agent-msg-assistant";
-    bubble.dataset.msgId = messageId;
-    thread.appendChild(bubble);
-  }
-
-  if (delta) bubble.textContent += delta;
-  if (done)  bubble.classList.add("agent-msg-done");
-
-  thread.scrollTop = thread.scrollHeight;
-}
-
-/**
- * Send a user message to the connected Custom Agent.
- * Renders the bubble immediately so the UI is responsive.
- */
-function sendUserMessage(text) {
-  const trimmed = text.trim();
-  if (!trimmed) return;
-
-  const thread = document.getElementById("agent-message-thread");
-  if (thread) {
-    thread.querySelector(".agent-thread-empty")?.remove();
-    const bubble = document.createElement("div");
-    bubble.className = "agent-bubble agent-msg-user";
-    bubble.textContent = trimmed;
-    thread.appendChild(bubble);
-    thread.scrollTop = thread.scrollHeight;
-  }
-
-  if (typeof sendToAgent === "function") {
-    sendToAgent({ type: "USER_MESSAGE", message: trimmed });
-  }
 }
 
 // ============================================================
