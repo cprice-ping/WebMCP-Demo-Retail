@@ -1,10 +1,16 @@
 # WebMCP Retail Demo
 
-A fully client-side retail demo that implements the [W3C WebMCP Draft Spec](https://webmachinelearning.github.io/webmcp/) with PingOne OIDC authentication and **PingOne Authorize policy decisions at checkout**. It demonstrates a key architectural principle:
+A retail demo that implements the [W3C WebMCP Draft Spec](https://webmachinelearning.github.io/webmcp/) with PingOne OIDC authentication and PingOne Authorize policy decisions at checkout.
 
-> **The user's existing OIDC session is sufficient for agent identity — no separate agent OAuth flow is required.**
+The core idea: agents authenticate through the same OIDC stack as humans, but through their own OAuth clients. Every session's token carries a `client_id` that records how it was created — human sign-in, agent-initiated redirect, or agent-only CIBA — and the Authorize policy keys on that to decide what the session may do. Authentication isn't replaced by the agent; it's relocated to whichever entrypoint fits, and the provenance travels in the token.
 
-A checkout request is evaluated by a PingOne Authorize policy before any order is placed. The policy receives the full request context — who the user is, which application is acting (the token's `client_id`: main client for human sign-ins, the agentic client for tool-initiated sessions), and what they're trying to do — and can return `PERMIT`, `DENY`, or trigger a **step-up challenge** that routes the tab through the OOB HILT flow, with the agent mediating the feedback loop.
+Three sign-in paths support three ways of using an agent:
+
+1. **Human** — the Sign In button. The person signs in; a sidecar agent sharing the tab uses that session.
+2. **Agent-initiated, person present** — the `login` tool. The tab redirects through PingOne and the person approves out-of-band.
+3. **Agent-only / headless** — the `ciba_login` tool. A CIBA push goes to the person's device; the tab never navigates.
+
+A checkout request is evaluated by a PingOne Authorize policy before any order is placed. The policy receives who the user is, which client is acting, and what they're trying to do, and can return `PERMIT`, `DENY`, or demand step-up verification before the order goes through.
 
 Live demo: **https://cprice-ping.github.io/WebMCP-Demo-Retail/**
 
@@ -12,7 +18,7 @@ Live demo: **https://cprice-ping.github.io/WebMCP-Demo-Retail/**
 
 ## What This Demonstrates
 
-When an MCP agent (e.g. the [MCP Tool Explorer](https://marketplace.visualstudio.com/items?itemName=AutomateTheEarth.mcp-tool-explorer) VS Code extension) invokes a tool on this page, it uses the same `access_token` already present in the user's browser session as a `Bearer` credential. The `client_id` embedded in that token identifies _which application_ made the request. No second OAuth dance, no agent-specific credentials.
+When an MCP agent invokes a tool on this page, it uses the `access_token` already present in the browser session (or delivered by the CIBA broker) as the `Bearer` credential. The `client_id` in that token says which application made the request — the main client for human sign-ins, the companion client for agent-initiated redirects, the headless client for CIBA sessions. Same user, same `sub`, different provenance.
 
 The **Token Inspector** panel (right-hand side) shows this in real time:
 
@@ -51,16 +57,18 @@ Browser
 
 ---
 
-## The Six Tools
+## The Tools
 
 | Tool | Type | Auth required | Notes |
 |---|---|---|---|
-| `login` | OIDC in-tab redirect | Signed out only | Agent-initiated sign-in. The agent asks the user for their email in chat and passes it to the tool; the tab navigates to PingOne, the user completes OOB verification (e.g. approves on their phone), and the app returns signed in via the callback. Unregisters itself once a session exists. |
+| `login` | OIDC redirect | Signed out only | Agent-initiated sign-in for a tab the person can see. The agent asks for the email in chat, passes it to the tool, the tab navigates to PingOne, the person approves out-of-band, and the app returns signed in. Unregisters itself once a session exists. |
+| `ciba_login` | CIBA via backend broker | Signed out only | Agent-initiated sign-in without navigating the tab — safe headless. The broker calls `/as/cibaAuthorization`, PingOne sends the approval to the person's device, the person approves, tokens land on one poll of `auth_status`. Requires the backend server. |
+| `auth_status` | Broker poll | Signed out | Without `request_id`: reports the current session (`signed_in`, `client_id`, `provenance`). With one: polls the pending CIBA approval. |
 | `view_products` | `GET /api/products.json` | Session | `readOnlyHint: true`; populates `PRODUCTS[]` and renders the grid |
 | `add_to_cart` | Mutation | Session | Takes `product_id` + `quantity`; updates in-memory `cart{}` |
 | `view_cart` | Read | Session | `readOnlyHint: true`; returns cart contents + total as JSON |
 | `remove_from_cart` | Mutation | Session | Takes `product_id`; removes it entirely from `cart{}` |
-| `checkout` | Host prompt → `POST /api/checkout` | Session + Bearer | The host prompts the user before the tool runs (`consequentialHint`) — extension permission card, browser chrome, or agent chat. POSTs to the server, which validates the AT and calls PingOne Authorize: PERMIT → order placed; interactive deny → the tab navigates to the OOB HILT flow (same mechanism as the login tool — the DaVinci flow decides what verification runs), the cart is stashed and restored on return, and the agent re-calls checkout with the fresh session. Human-in-tab paths (button, console) use the in-page modals instead. |
+| `checkout` | `POST /api/checkout` | Session + Bearer | `consequentialHint: true` — the host prompts before the tool runs. Agent path: PERMIT → order placed; interactive deny → the tab navigates to the OOB flow, cart stashed and restored on return, agent calls checkout again. Human-in-tab path (button, console): in-page modals instead. |
 
 ### Session Guard
 
@@ -78,23 +86,32 @@ function requireSession() {
 
 ### User confirmation (checkout)
 
-The current WebMCP spec removed the tool-initiated elicitation API (`client.requestUserInteraction` no longer exists). Confirmation is now a **page concern**: `checkout` shows an in-page modal that must be approved before the `POST` is sent. Agents enforce their own user prompt using the `consequentialHint: true` annotation — the WebMCP Extension, for example, shows a permission card for any tool marked consequential. The page also honors the spec's `ToolExecuteCallbackOptions.signal`: if the agent aborts the in-flight call, the confirmation modal closes automatically.
+The current WebMCP spec has no tool-initiated elicitation API, so confirmation happens on two sides:
 
-If PingOne Authorize returns a **step-up MFA challenge**, a second in-page modal collects the OTP the user received by email, without any additional agent turn. The full loop:
+- **Host side**: `checkout` carries `consequentialHint: true`, so a WebMCP host shows its own permission card before executing (the WebMCP extension does this; browser chrome does the same for native implementations).
+- **Page side**: when the call originates from the page's own UI (console button, product grid), the in-page confirmation modal runs — the human is right there. The modal honors `ToolExecuteCallbackOptions.signal`: if the agent aborts the call, the modal closes.
+
+When the call comes through `document.modelContext`, there is no in-page confirmation — the host already prompted. This split is deliberate: an agent executing in a hidden tab has no human watching the page, so an in-page modal would hang forever.
+
+### Step-up (P1AZ deny)
+
+If the Authorize policy demands stronger verification than the session carries, the deny comes back with a statement payload, and the page routes by who could possibly be watching:
+
+**Agent path** (`document.modelContext` — the tab may be unattended): any interactive deny stashes the cart in `sessionStorage` and returns `{challenge: "STEP_UP_REQUIRED"}` while the tab navigates to the OOB sign-in flow. The DaVinci flow decides what verification runs (Verify push, OTP, anything). When the person completes it out-of-band, the app reloads with a fresh session, the cart is restored, and the agent calls `checkout` again.
 
 ```
 Agent calls checkout
-  → Modal 1: confirm purchase (user clicks OK)
-  → POST /api/checkout  (first pass)
-  → P1AZ: DENY + deny-stepup advice  (OTP sent to user's email)
-  → Server: 202 { challenge: "MFA_REQUIRED", deviceAuthenticationId }
-  → Modal 2: enter OTP
-  → POST /api/checkout  (second pass, includes otpCode + deviceAuthenticationId)
-  → P1AZ: PERMIT
-  → Order placed
+  → POST /api/checkout
+  → P1AZ: DENY with step-up statement
+  → tool returns {challenge: "STEP_UP_REQUIRED"}, tab navigates to OOB flow
+  → person approves on their device
+  → app reloads signed in, cart restored
+  → agent calls checkout again → P1AZ: PERMIT → order placed
 ```
 
-Because the tool and DOM share the same process, no round-trip protocol is needed — the page's own modals are the user-interaction channel.
+**Human-in-tab path** (UI clicks): in-page modals handle the same challenges — OTP entry for `deny-stepup`, a Verify QR poll for `deny-verify` — since the person is present to interact with them.
+
+**Headless sessions should get a plain DENY instead** — see the statement-code contract under [PingOne Authorize Policy](#pingone-authorize-policy). A step-up redirect on an unattended tab destroys the agent's session mid-task.
 
 ### Agent-initiated login (`login` tool)
 
@@ -123,13 +140,44 @@ No popup, no in-page confirmation UI, no relay: a main-frame navigation needs no
 3. In PingOne, map that flow policy to the **agentic client's** sign-on policy (`PINGONE_AGENTIC_CLIENT_ID`) — tool logins route to the OOB flow automatically; button logins on the main client keep the default policy.
 4. The redirect URI is the same one already registered (`PINGONE_REDIRECT_URI`) — the tab itself returns to the app.
 
-This is agent-initiated HILT: the identity was collected by the agent, the human approved it out-of-band on a device they hold, and the resulting code lands in a session marked as agent-initiated by the agentic client's `client_id` — which the server forwards to PingOne Authorize as `Request.clientId` for policy conditioning.
+This is agent-initiated HILT: the identity was collected by the agent, the person approved it out-of-band on a device they hold, and the resulting code lands in a session marked as agent-initiated by the companion client's `client_id` — which the server forwards to PingOne Authorize as `Request.clientId` for policy conditioning.
+
+### Agent-initiated headless login (`ciba_login` tool)
+
+The `ciba_login` tool serves sessions where the tab may have no human at any point — a headless browser an agent is driving. The tab never navigates; the only network activity is the broker. The person's entire experience is a notification they approve.
+
+```
+Agent calls ciba_login { email }
+  → POST /api/auth/start { email }
+      → broker POSTs /as/cibaAuthorization (Basic auth: headless client credentials;
+        login_hint=<email>; binding_message="WebMCP" — PingOne caps it at 8 chars)
+      → { auth_req_id, expires_in, interval } — auth_req_id stays on the server
+      → tool returns { request_id, expires_in, next_step }
+  → PingOne invokes the app's CIBA DaVinci flow, which notifies the person
+  → person approves on their device
+  → agent polls auth_status { request_id }
+      → broker POSTs /as/token (grant_type=urn:openid:params:grant-type:ciba,
+        same Basic auth) → tokens stored server-side
+  → next poll returns { status: "approved" }
+  → tool fetches tokens once from POST /api/auth/token (one-time pickup),
+      stashes them in sessionStorage, sets agent_auth_mode="broker",
+      unregisters login/ciba_login/auth_status, registers the store tools
+```
+
+Notes:
+
+- The broker enforces the AS's polling interval (`authorization_pending` / `slow_down` discipline) so the tab can poll as often as it likes.
+- The DaVinci flow behind the headless client must use the **CIBA Flow** toggle in Flow Settings and end in **Return CIBA Success / Return CIBA Error** connectors — a normal human-UX flow fails with "Unable to parse Http connector response" because CIBA flows run without an attached browser.
+- Broker sessions don't silently refresh: the headless tab has no AS session cookie, so tokens simply expire (~1h) and the agent runs `ciba_login` again when needed.
+- The email the person receives carries the real context (app name, approval link); `binding_message` is only the 8-character comparison code, and one code is sufficient since the tenant runs a single CIBA entrypoint.
+
+Tool descriptions are the agent's selection contract between `login` and `ciba_login`: `login` warns against headless use (navigation unloads the tab); `ciba_login` is safe anywhere but notes that `login` gives better provenance when a person is present. The agent picks based on what it knows about its own context.
 
 ---
 
 ## Auth Flow
 
-Standard OIDC Authorization Code + PKCE:
+Standard OIDC Authorization Code + PKCE (all three paths — button, `login`, `ciba_login` — build on this):
 
 ```
 User clicks "Sign In"
@@ -141,13 +189,7 @@ User clicks "Sign In"
   → mountApp()    calls invokeTool("view_products") to bootstrap the UI
 ```
 
-**Three login paths, one app** (see `docs/agent-auth-modes-spec.md`):
-
-1. **Human** — the Sign In button (main client). Human + sidecar agent share this session.
-2. **Agent-initiated, browser present** — the `login` tool (agentic client): the tab navigates to the OOB HILT flow, the user approves on their device, the app returns signed in.
-3. **Agent-only / headless** — the `ciba_login` tool (agentic client, **CIBA**): the backend broker calls `/as/cibaAuthorization`, authenticated with the headless app's own `client_secret_basic` (standard OAuth client auth — no worker token; the secret can only initiate backchannel requests, no token issues without the person approving the push), PingOne pushes an approval request to the person's device (email is required — it targets the person), the person approves, the broker exchanges `auth_req_id` for tokens and hands them to the tab once. No redirect, no code to type — the human's whole experience is a notification they approve. The tab polls `auth_status`; that is its only waiting primitive.
-
-All three land in the same `TokenProvider` seam (`getAccessToken()` + `agent_auth_mode`); everything downstream — tools, checkout, P1AZ — is mode-agnostic and keys on the token's `client_id`.
+All three paths land in the same `TokenProvider` seam (`getAccessToken()` + `agent_auth_mode`); everything downstream — tools, checkout, P1AZ — is mode-agnostic and keys on the token's `client_id`.
 
 **Silent refresh.** On page load, if the `access_token` is expired, `startSilentLogin()` sends `prompt=none` to the AS. If the AS session cookie is still valid, fresh tokens are issued without showing UI. If not, `error=login_required` is returned and the user sees the login screen.
 
@@ -164,30 +206,21 @@ The `id_token` is never sent to a Resource Server. The `access_token` is the ope
 
 ## Setup
 
-### 1. PingOne Application
+### 1. PingOne Applications
 
-Create a **Single-Page Application** in your PingOne environment with:
+Three OIDC applications in your PingOne environment — one per session entrypoint, so policy can tell them apart:
 
-- **Grant type:** Authorization Code
-- **Response type:** Code
-- **PKCE:** Required (S256)
-- **Redirect URI:** `https://<your-github-username>.github.io/<repo-name>/` (and `http://localhost:8080` for local dev)
-- **Scopes:** `openid profile email`
-- **Token endpoint auth method:** None (public client)
+| Application | Type | Used by | Config |
+|---|---|---|---|
+| Main (public) | SPA | Sign In button | Authorization Code + PKCE (S256), redirect URI `https://<you>.github.io/<repo>/` (+ localhost), scopes `openid profile email`, token auth: none |
+| Companion (public) | SPA | `login` tool | Same shape as main, same redirect URIs; sign-on policy mapped to the OOB HILT DaVinci flow |
+| Headless (confidential) | Service/Web | `ciba_login` tool (via broker) | Token auth: Client Secret Basic; grant: CIBA; flow policy mapped to the push-approval DaVinci flow |
+
+The main and companion clients go in `config.js` (`PINGONE_CLIENT_ID`, `PINGONE_AGENTIC_CLIENT_ID`); the headless client's ID and secret go in the server env (`HEADLESS_CLIENT_ID`, `HEADLESS_CLIENT_SECRET`).
 
 ### 2. Configure `config.js`
 
-```js
-const CONFIG = {
-  PINGONE_CLIENT_ID:       "<your-app-client-id>",
-  PINGONE_ENVIRONMENT_ID:  "<your-environment-id>",
-  PINGONE_REDIRECT_URI:    window.location.origin + window.location.pathname,
-  PINGONE_SCOPES:          "openid profile email",
-  SHOP_API_BASE:           window.location.origin + window.location.pathname.replace(/\/$/, "") + "/api",
-};
-```
-
-`PINGONE_AS_BASE` is constructed from `PINGONE_ENVIRONMENT_ID` at runtime — you do not need to set it manually.
+Set the client IDs from step 1 (`PINGONE_AGENTIC_CLIENT_ID` may stay empty to route `login` through the main client, but the dedicated companion client is what gives those sessions their provenance). `SHOP_API_BASE` points at your deployed backend. `PINGONE_AS_BASE` is derived from `PINGONE_ENVIRONMENT_ID` at runtime.
 
 ### 3. Deploy to GitHub Pages
 
@@ -215,7 +248,7 @@ python3 -m http.server 8080
 The right-hand **Tool Console** panel shows every tool invocation in real time — both UI-triggered and agent-triggered calls share the same log. This makes the demo useful for explaining what an agent actually does when it calls a tool.
 
 Each log entry includes:
-- The call source (`ui`, `custom-agent`, or `document.modelContext`)
+- The call source (`ui` for page-internal calls, `document.modelContext` for host-mediated agent calls)
 - The full outbound HTTP request (method, URL, headers including Bearer)
 - A note on which token is used and why
 - The response payload
@@ -243,16 +276,17 @@ document.modelContext.registerTool({
 
 ---
 
-## Optional: Node.js API Server (Docker / k8s)
+## Backend API Server (Docker / k8s)
 
-The default demo serves static JSON from GitHub Pages and simulates the `POST /api/checkout` response client-side. For a real deployment — or to add **PingOne Authorize policy decisions** at checkout — a Node.js backend is included in [`server/`](server/).
+The static site can run standalone, but the three sign-in paths and real policy decisions need the backend: `login`/`ciba_login` work against PingOne directly, but `ciba_login` requires the CIBA broker in [`server/`](server/) (`/api/auth/*`), and PingOne Authorize checkout decisions happen server-side. Point `SHOP_API_BASE` at the deployed server.
 
 ```
 server/
 ├── server.js              Express entry point, CORS, routes
 ├── routes/
 │   ├── products.js        GET  /api/products
-│   └── checkout.js        POST /api/checkout  (AT validation → AZ decision → order)
+│   ├── checkout.js        POST /api/checkout  (AT validation → AZ decision → order)
+│   └── auth.js            /api/auth/*  — CIBA broker for the ciba_login tool (Mode C)
 ├── lib/
 │   ├── token.js           Full JWKS signature validation (jose)
 │   └── pingone-az.js      Client credentials token cache + decision endpoint client
@@ -275,27 +309,23 @@ server/
 POST /api/checkout
   Authorization: Bearer <user_AT>
 
-  First pass:
   1. Validate AT signature via PingOne JWKS  (server can do this; browser cannot)
   2. client_credentials → PingOne worker token  (secret never leaves the server)
   3. POST /decisionEndpoints/{id}
        parameters:   { Request.clientId, Request.scope,
-                       Request.orderTotal, Request.orderItemCount }
+                       Request.orderTotal, Request.orderItemCount,
+                       Request.authTime, Request.tokenIssuedAt }
        userContext:  { user: { id: <sub> } }
   4a. PERMIT  → return order receipt
-  4b. DENY + deny-stepup advice
-              → 202 { challenge: "MFA_REQUIRED", deviceAuthenticationId }
-              (P1AZ obligation has already sent OTP to user's email)
-  4c. DENY (no step-up) → 403 { decision, advice }
+  4b. DENY with a step-up statement (payload present)
+              → 202 { denied: true, statements: [...] }
+              (the page dispatches on the statement code — see Step-up above;
+               agent path navigates to the OOB flow for a fresh auth_time)
+  4c. DENY without statements (plain deny) → 403 { decision, advice }
 
-  Second pass (user submitted OTP):
-  1-2. Same AT validation + worker token
-  3. POST /decisionEndpoints/{id}
-       parameters:   { ...same as first pass,
-                       Request.otpCode, Request.deviceAuthenticationId }
-       userContext:  { user: { id: <sub> } }
-  4a. PERMIT  → return order receipt
-  4b. DENY    → 403 { decision, advice }
+  Retry after step-up:
+  1-4. Same flow — the fresh session's auth_time now satisfies the policy,
+       or the policy's own second-pass rules (Request.otpCode etc.) apply
 ```
 
 ### Local dev
@@ -328,6 +358,8 @@ kubectl create secret generic shopapi-secrets \
   --from-literal=AZ_CLIENT_ID=xxx \
   --from-literal=AZ_CLIENT_SECRET=xxx \
   --from-literal=AZ_DECISION_ENDPOINT_ID=xxx \
+  --from-literal=HEADLESS_CLIENT_ID=xxx \
+  --from-literal=HEADLESS_CLIENT_SECRET=xxx \
   -n shopmcp
 
 # Build and push your image
@@ -359,12 +391,16 @@ Create these attributes under **Authorize → Trust Framework → Attributes →
 | `scope` | String | Every request |
 | `orderTotal` | String | Every request |
 | `orderItemCount` | String | Every request |
+| `authTime` | String | Every request (epoch seconds — session freshness) |
+| `tokenIssuedAt` | String | Every request (epoch seconds — token age) |
 | `otpCode` | String | Second pass only (MFA verification) |
 | `deviceAuthenticationId` | String | Second pass only (MFA verification) |
 
 In decision endpoint parameters these are referenced as e.g. `Request.clientId` (folder path + attribute name).
 
-### Policy — two rules
+### Policy — example rules
+
+One example policy that exercises the full loop. Your own rules will likely also condition on `Request.clientId` (that's the whole point of the client split) and `Request.authTime` (fresh-session checks).
 
 **Rule 1: First pass → step-up MFA**
 
@@ -383,6 +419,8 @@ Obligation: trigger PingOne MFA to send an OTP to the user identified by `userCo
 Condition: `Request.otpCode` is present **AND** `Request.deviceAuthenticationId` is present
 
 Effect: Use `Request.deviceAuthenticationId` + `Request.otpCode` to call PingOne MFA verify. If the OTP is valid → `PERMIT`. If invalid → `DENY`.
+
+**Headless posture:** rules matching the headless client (`Request.clientId`) should end in plain `DENY` — no statement payloads — unless the page has a dispatch branch for the code (see below).
 
 ### Statement codes — the policy ↔ tool contract
 
@@ -421,6 +459,8 @@ Credentials are passed via `HEADLESS_CLIENT_ID` / `HEADLESS_CLIENT_SECRET` env v
 | [app.js](app.js) | OIDC flow, WebMCP tool registration, tool implementations, UI logic, cart state |
 | [index.html](index.html) | UI shell — views, nav, token inspector tabs, checkout modal |
 | [styles.css](styles.css) | All styling including tool label badges, token inspector, tools pane toggle |
-| [config.js](config.js) | PingOne OIDC coordinates and API base URL |
+| [config.js](config.js) | PingOne OIDC coordinates (main, companion, and headless clients) and API base URL |
 | [api/products.json](api/products.json) | Product catalog for the static GitHub Pages demo |
-| [server/](server/) | Optional Node.js API server with JWKS validation and PingOne Authorize integration |
+| [api/webmcp.json](api/webmcp.json) | Static tool descriptor mirror (documentation for tool consumers) |
+| [docs/agent-auth-modes-spec.md](docs/agent-auth-modes-spec.md) | Historical design record for the three-mode auth architecture |
+| [server/](server/) | Node.js API server: JWKS validation, PingOne Authorize checkout, CIBA broker |

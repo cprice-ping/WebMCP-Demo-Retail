@@ -1144,16 +1144,16 @@ async function checkoutPost(requestBody) {
 }
 
 // ── Agent path ─────────────────────────────────────────────────────────
-// Stateless tool calls with the agent mediating the human loop. In CUA mode
-// the interface between tab and human is the agent chat, not the browser —
-// so in-flow feedback must return as tool results the agent relays:
-//   checkout → { success, order }                       (permitted first pass)
-//   checkout → { challenge: "MFA_REQUIRED", ... }       (P1AZ step-up)
-//              → agent asks human for the OTP in chat
-//              → verify_checkout_otp { otpCode, ... }   (second pass → permit)
-//   checkout → { challenge: "VERIFY_TRANSACTION", ... } (PingOne Verify QR)
-//              → human approves in the Verify app
-//              → check_checkout_verification {}          (page polls server)
+// Stateless tool calls. In agent-driven modes the interface between the tab
+// and the human is the agent chat, not the browser — so any in-flow feedback
+// returns as a structured tool result the agent relays:
+//   checkout → { success, order }                       (permitted)
+//   checkout → { challenge: "STEP_UP_REQUIRED", ... }   (P1AZ interactive deny)
+//              → tab navigates to the OOB flow, cart stashed
+//              → person verifies out-of-band, app reloads, cart restored
+//              → agent calls checkout again (fresh auth_time → permit)
+// The page never implements verification methods itself; the DaVinci flow
+// owns what verification runs.
 function checkoutHandlerAgent(args) {
     const summary = cartSummary();
     const order = { ...summary, order_id: `ORD-${Date.now()}-${Math.random().toString(36).slice(2, 8).toUpperCase()}` };

@@ -1,5 +1,14 @@
 # Agent Auth Spec: One Web App, Three Identity Modes
 
+> **Historical design record — superseded by the README.** This document is the
+> original design from before implementation. Two things changed since it was
+> written: Mode C uses **CIBA** (push approval via the backend broker) instead of
+> Device Code, which failed in practice (the human has to be told a code, and the
+> headless tab had no UX for the polling); and the companion and headless modes
+> use **separate PingOne clients**, so P1AZ policy can give them different
+> postures. The working truth — login paths, broker, tools, PingOne setup — is
+> the README. This file is kept as the record of how the design evolved.
+
 Goal: Person-only, Person + Companion Agent, and Agent-only sessions all work through
 the same SPA, the same WebMCP tools, and the same backend. The only difference is
 **where the access token comes from**, selected by a single "token provider" seam.

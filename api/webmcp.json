@@ -1,6 +1,6 @@
 {
   "siteLabel": "accessories",
-  "description": "WebMCP Retail demo \u2014 accessories store with WebMCP + AG-UI custom agent support",
+  "description": "WebMCP Retail demo \u2014 accessories store with PingOne agent authentication (companion + headless modes)",
   "tools": [
     {
       "name": "login",
@@ -21,6 +21,44 @@
       "annotations": {
         "readOnlyHint": false,
         "consequentialHint": false
+      }
+    },
+    {
+      "name": "ciba_login",
+      "title": "CIBA Login",
+      "description": "Signs the user in WITHOUT navigating this tab \u2014 safe in any context, including headless or ephemeral automation where navigation would destroy the tab. The authorization server pushes an approval request to the person's device (e.g. a push notification they approve); no redirect, no code entry. email is REQUIRED \u2014 it identifies whose device receives the approval (ask the person in chat). After calling this, poll auth_status { request_id } until it returns approved. Prefer login instead when a person is watching the tab, so the session carries companion provenance (fuller permissions). Only usable when signed out. Requires the backend server.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "email": {
+            "type": "string",
+            "description": "The user's email address \u2014 REQUIRED. Ask the user for it in chat; the approval request is pushed to that person's device."
+          }
+        },
+        "required": [
+          "email"
+        ]
+      },
+      "annotations": {
+        "readOnlyHint": false,
+        "consequentialHint": false
+      }
+    },
+    {
+      "name": "auth_status",
+      "title": "Auth Status",
+      "description": "Without request_id: reports the current tab session ({ signed_in, client_id }). With request_id (from ciba_login): polls the pending CIBA approval \u2014 returns pending (with retry_after), approved (session established), expired, or denied.",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "request_id": {
+            "type": "string",
+            "description": "The request_id returned by ciba_login. Omit to check the tab's current session."
+          }
+        }
+      },
+      "annotations": {
+        "readOnlyHint": true
       }
     },
     {
