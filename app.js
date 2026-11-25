@@ -1102,7 +1102,7 @@ async function removeFromCartHandler({ product_id }) {
 // Tool: checkout — registered dynamically via syncCartTools() when cart has items
 const CHECKOUT_DESCRIPTOR = {
     title: "Checkout",
-    description: "Places the current cart as an order via POST /api/checkout using the user's access_token as a Bearer credential. Requires an active user session and a non-empty cart. The host prompts the user for confirmation before this tool runs (consequentialHint). If the authorization policy requires step-up, the tab navigates to a PingOne verification flow — the user approves out-of-band and the tool is called again once the app returns with a fresh session.",
+    description: "Places the current cart as an order via POST /api/checkout using the user's access_token as a Bearer credential. Requires an active user session and a non-empty cart. The host prompts the user for confirmation before this tool runs (consequentialHint). If the authorization policy requires step-up, the response carries { challenge: \"STEP_UP_REQUIRED\" }: in a redirect-authenticated session the tab navigates to the PingOne verification flow (person approves out-of-band, app reloads, cart restored — call this tool again); in a CIBA/broker session there is no navigation — an approval request is pushed to the person's device and you poll auth_status { request_id } until approved, then call this tool again.",
     parameters: {},
     annotations: { consequentialHint: true },
     ui: {

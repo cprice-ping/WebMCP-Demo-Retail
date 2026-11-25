@@ -95,23 +95,45 @@ When the call comes through `document.modelContext`, there is no in-page confirm
 
 ### Step-up (P1AZ deny)
 
-If the Authorize policy demands stronger verification than the session carries, the deny comes back with a statement payload, and the page routes by who could possibly be watching:
+If the Authorize policy demands stronger verification than the session carries, the deny comes back with a statement payload. The server stashes the authoritative order summary under a short reference code (`step_up_code`) and returns it with the deny; the page then routes by the session's own auth mode — the same mechanism that created the session re-authenticates it.
 
-**Agent path** (`document.modelContext` — the tab may be unattended): any interactive deny stashes the cart in `sessionStorage` and returns `{challenge: "STEP_UP_REQUIRED"}` while the tab navigates to the OOB sign-in flow. The DaVinci flow decides what verification runs (Verify push, OTP, anything). When the person completes it out-of-band, the app reloads with a fresh session, the cart is restored, and the agent calls `checkout` again.
+**Agent path** (`document.modelContext` — the tab may be unattended). The transport matches the session:
+
+- **Browser session** (button or `login` tool): the tab navigates to the OOB sign-in flow under the session's own client. The `step_up_code` rides as a custom authorize parameter; the tool returns `{challenge: "STEP_UP_REQUIRED", transport: "redirect", redirecting: true}` and execution ends (same pattern as the login tool). When the person completes verification out-of-band, the app reloads with a fresh session, the cart is restored, and the agent calls `checkout` again.
 
 ```
 Agent calls checkout
   → POST /api/checkout
-  → P1AZ: DENY with step-up statement
-  → tool returns {challenge: "STEP_UP_REQUIRED"}, tab navigates to OOB flow
+  → P1AZ: DENY with step-up statement → 202 { denied, step_up_code, statements }
+  → tool stashes cart, navigates tab to OOB flow (step_up_code in the request object)
   → person approves on their device
   → app reloads signed in, cart restored
   → agent calls checkout again → P1AZ: PERMIT → order placed
 ```
 
-**Human-in-tab path** (UI clicks): in-page modals handle the same challenges — OTP entry for `deny-stepup`, a Verify QR poll for `deny-verify` — since the person is present to interact with them.
+- **Broker session** (`ciba_login`): CIBA re-auth through the backend broker — no navigation. The `step_up_code` becomes the CIBA `binding_message`; the tool returns `{challenge: "STEP_UP_REQUIRED", transport: "ciba", request_id}` and re-registers `auth_status` for the polling phase. The person's experience is the same push as sign-in; on approval the session refreshes under the same headless client with a fresh `auth_time`, the cart is restored, and the agent re-calls `checkout`.
 
-**Headless sessions should get a plain DENY instead** — see the statement-code contract under [PingOne Authorize Policy](#pingone-authorize-policy). A step-up redirect on an unattended tab destroys the agent's session mid-task.
+```
+Agent calls checkout
+  → POST /api/checkout → 202 { denied, step_up_code, statements }
+  → tool calls POST /api/auth/start { email, step_up_code }  (no navigation)
+  → tool returns { challenge: "STEP_UP_REQUIRED", transport: "ciba", request_id }
+  → person approves the push on their device
+  → agent polls auth_status { request_id } → approved (session refreshed, cart restored)
+  → agent calls checkout again → P1AZ: PERMIT → order placed
+```
+
+**Human-in-tab path** (UI clicks): in-page modals handle the challenges, dispatched by statement code:
+
+| Code | Page behavior | Payload fields read |
+|---|---|---|
+| `deny-stepup` | OTP modal → second POST with `otpCode` + `deviceAuthenticationId` | `message`, `deviceAuthenticationId` |
+| `deny-verify` | Verify QR modal → polls → POST with `verifyTransactionId` | `message`, `qrUrl`, `webVerificationCode`, `verifyTransactionId` |
+| anything else | logged as unhandled → checkout fails with "unhandled statement code(s)" | — |
+
+**Transaction context travels as a pointer, not a payload.** The deny stash holds the server-confirmed order summary; the `step_up_code` reaches the verification flow via the authorize request object (redirect) or `binding_message` (CIBA), and the DaVinci flow fetches the real summary from `GET /api/auth/context/:code` on the broker. The flow displays only server-confirmed data — anything the client passed in the request is treated as a claim, not a fact.
+
+**Statement codes on the agent path:** the server treats *any* payload-bearing statement as interactive step-up regardless of its code name; the agent path doesn't branch on the code (the DaVinci flow owns what verification runs). The code names matter only to the human-in-tab dispatch table above. See the statement-code contract under [PingOne Authorize Policy](#pingone-authorize-policy).
 
 ### Agent-initiated login (`login` tool)
 
@@ -318,9 +340,9 @@ POST /api/checkout
        userContext:  { user: { id: <sub> } }
   4a. PERMIT  → return order receipt
   4b. DENY with a step-up statement (payload present)
-              → 202 { denied: true, statements: [...] }
-              (the page dispatches on the statement code — see Step-up above;
-               agent path navigates to the OOB flow for a fresh auth_time)
+              → 202 { denied: true, step_up_code, statements: [...] }
+              (order summary stashed under step_up_code; the page routes by
+               auth mode — OOB redirect or CIBA re-auth, see Step-up above)
   4c. DENY without statements (plain deny) → 403 { decision, advice }
 
   Retry after step-up:
@@ -424,13 +446,16 @@ Effect: Use `Request.deviceAuthenticationId` + `Request.otpCode` to call PingOne
 
 ### Statement codes — the policy ↔ tool contract
 
-The statement `code` in an advice payload is the contract between policy authors and this app's tool layer: the server forwards payloads as-is, the client dispatches on the code (`app.js` checkout agent path). Codes the tool handles today:
+The server's rule is structural: **any deny whose statements carry a payload** is interactive step-up (202 with `step_up_code`); **a payload-less statement** (or none) is a plain DENY (403, terminal, session survives). What the code *name* selects differs by path:
 
-| Code | Tool behavior |
-|---|---|
-| `deny-stepup` (with payload) | Stashes cart, returns `{challenge: "STEP_UP_REQUIRED"}`, tab navigates to the OOB flow; agent re-calls checkout after fresh auth_time |
+- **Agent path** (`document.modelContext`): the code name is not branched on — any interactive deny routes to step-up by transport (redirect for browser sessions, CIBA for broker sessions; see [Step-up](#step-up-p1az-deny)). The DaVinci flow owns what verification runs, so the code is informational to the tool.
+- **Human-in-tab path** (UI clicks): the page dispatches on the code name — `deny-stepup` (OTP modal) and `deny-verify` (Verify QR poll) have handlers; any other code fails with "unhandled statement code(s)". Until a third handler exists, policies serving UI-originated checkouts should stick to these two names.
 
-**Authoring rule of thumb:** a statement *without* a payload is treated as a **plain DENY** (403, terminal answer, session survives). Interactive statements redirect the tab — **never attach step-up statements to rules matching headless sessions** (`Request.clientId` = the headless client): a headless tab has no human watching it, and the redirect destroys the agent's session mid-task. Headless denial should always be plain DENY. If a headless-verifiable statement code is added later (e.g. email-OTP relayed by the agent in chat), handle it in the client dispatch before using it in policy.
+**Authoring guidance:**
+
+- Interactive step-up statements (payload present) work for **all three clients** — browser sessions step up by redirect, broker sessions by CIBA push. Neither navigates an unattended tab into a dead end; the CIBA transport made the earlier "never step-up headless" restriction obsolete.
+- Reserve **plain DENY** (no payload) for the terminal "no, never" cases — a policy posture you don't want the client retrying with a fresher session.
+- If you add a new statement code for a new verification method, the agent path picks it up automatically (any payload → step-up); add a handler in the human-path dispatch only if UI-originated checkouts should support it too.
 
 ### Worker Application
 

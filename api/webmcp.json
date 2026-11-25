@@ -126,7 +126,7 @@
     {
       "name": "checkout",
       "title": "Checkout",
-      "description": "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. The host prompts the user for confirmation (consequentialHint) before this tool runs. If the policy requires step-up, the tab navigates to the PingOne OOB verification flow (user approves on their device); the app then returns with the cart intact \u2014 call this tool again to place the order. Dynamically registered \u2014 only available when the cart contains items.",
+      "description": "POSTs the cart to the checkout API using the user's access_token as a Bearer credential. The host prompts the user for confirmation (consequentialHint) before this tool runs. If the policy requires step-up, the response carries { challenge: \"STEP_UP_REQUIRED\" }: in a redirect-authenticated session the tab navigates to the PingOne verification flow (person approves out-of-band, app reloads, cart restored \u2014 call this tool again); in a CIBA/broker session there is no navigation \u2014 an approval request is pushed to the person's device and you poll auth_status { request_id } until approved, then call this tool again. Dynamically registered \u2014 only available when the cart contains items.",
       "parameters": {},
       "annotations": {
         "consequentialHint": true
